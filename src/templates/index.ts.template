@@ -36,35 +36,44 @@ class GhostBase {
   }
 
   protected async execute<T>({
-    transactions,
     signature,
+    txnBuilder,
+    argsOrArgsArray,
+    extraMethodCallArgs,
     extraSimulateArgs,
   }: {
-    transactions: Transaction[]
     signature: string
+    txnBuilder: (builder: {{ARC56_NAME}}Composer<any>, args: any /* TODO */) => {{ARC56_NAME}}Composer<any>
+    argsOrArgsArray: any
+    extraMethodCallArgs?: ExtraMethodCallArgs
     extraSimulateArgs?: RawSimulateOptions
   }): Promise<T[]> {
-    const suggestedParams = await this.getAndCacheSuggestedParams()
+    await this.getAndCacheSuggestedParams()
     const methodName = signature.slice(0, signature.indexOf('('))
 
-    let builder: {{ARC56_NAME}}Composer<any> = this.client.newGroup()
+    // Avoiding .createTransaction because it compiles on the fly (why?). build app args and convert to app create
+    let throwawayBuilder: {{ARC56_NAME}}Composer<any> = this.client.newGroup()
+    const argsArray = Array.isArray(argsOrArgsArray) ? argsOrArgsArray : [argsOrArgsArray]
+    for (const args of argsArray) {
+      throwawayBuilder = txnBuilder(throwawayBuilder, { args, signer: emptySigner, ...extraMethodCallArgs })
+    }
+    const { transactions } = await (await throwawayBuilder.composer()).buildTransactions()
 
+    let builder: {{ARC56_NAME}}Composer<any> = this.client.newGroup()
+    // convert to app creates, copy to new builder
     for (const txn of transactions) {
-      // probably lossy. what else is missing?
-      const { fee, firstValid, lastValid, } = txn
-      const createArgs = {
+      // @ts-ignore
+      txn.applicationCall = {
+        ...txn.applicationCall,
+        appIndex: 0,
         approvalProgram: Buffer.from(APP_SPEC.byteCode!.approval, 'base64'),
         clearProgram: Buffer.from(APP_SPEC.byteCode!.clear, 'base64'),
         numGlobalByteSlices: APP_SPEC.state.schema.global.bytes,
         numGlobalInts: APP_SPEC.state.schema.global.ints,
         numLocalByteSlices: APP_SPEC.state.schema.local.bytes,
         numLocalInts: APP_SPEC.state.schema.local.ints,
-        onComplete: OnApplicationComplete.NoOpOC,
-        sender: this.readerAccount,
-        suggestedParams: { ...suggestedParams, firstValid, lastValid, flatFee: true, fee},
-        appArgs: txn.applicationCall!.appArgs as Uint8Array[],
+        builder: builder.addTransaction(txn, emptySigner),
       }
-      builder = builder.addTransaction(makeApplicationCreateTxnFromObject(createArgs), emptySigner)
     }
 
     const { confirmations } = await builder.simulate({
@@ -85,7 +94,7 @@ class GhostBase {
 
     const retTypeStr = specRetObj.struct ?? specRetObj.type
     const retData: T[] = []
-    
+
     for (let i = 0; i < logs.length; i++) {
       retData.push(getABIDecodedValue(new Uint8Array(logs[i]), retTypeStr, this.factory.appSpec.structs) as T)
     }
