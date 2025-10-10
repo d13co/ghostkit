@@ -1,0 +1,105 @@
+/* BEGIN GHOST SDK CODE */
+
+import { getABIDecodedValue } from '@algorandfoundation/algokit-utils/types/app-arc56'
+import { CommonAppCallParams } from '@algorandfoundation/algokit-utils/types/composer'
+import { makeEmptyTransactionSigner, makeApplicationCreateTxnFromObject } from 'algosdk'
+
+const emptySigner = makeEmptyTransactionSigner()
+
+type ExtraMethodCallArgs = Omit<CommonAppCallParams, 'appId' | 'sender' | 'method' | 'args' | 'onComplete'>
+
+type Methods = {{ARC56_NAME}}Types['methods']
+
+class GhostBase {
+  static factory = {{ARC56_NAME}}Factory
+  static client = {{ARC56_NAME}}Client
+  
+  public algorand: AlgorandClient
+  public readerAccount = 'A7NMWS3NT3IUDMLVO26ULGXGIIOUQ3ND2TXSER6EBGRZNOBOUIQXHIBGDE' // non-mainnet fee sink
+  public factory: {{ARC56_NAME}}Factory
+  protected client: {{ARC56_NAME}}Client
+  public cacheParamsTimeout = 75 // ms
+
+  constructor({ algorand, readerAccount }: { algorand: AlgorandClient; readerAccount?: string }) {
+    this.algorand = algorand
+    if (readerAccount) this.readerAccount = readerAccount
+    this.factory = this.algorand.client.getTypedAppFactory({{ARC56_NAME}}Factory, {
+      defaultSender: this.readerAccount,
+    })
+    this.client = this.factory.getAppClientById({ appId: 1n })
+  }
+
+  protected async getAndCacheSuggestedParams() {
+    const suggestedParams = await this.algorand.getSuggestedParams()
+    this.algorand.setSuggestedParamsCache(suggestedParams, new Date(Date.now() + this.cacheParamsTimeout))
+    return suggestedParams
+  }
+
+  protected async execute<T>({
+    transactions,
+    signature,
+    extraSimulateArgs,
+  }: {
+    transactions: Transaction[]
+    signature: string
+    extraSimulateArgs?: RawSimulateOptions
+  }): Promise<T[]> {
+    const suggestedParams = await this.getAndCacheSuggestedParams()
+    const methodName = signature.slice(0, signature.indexOf('('))
+
+    let builder: {{ARC56_NAME}}Composer<any> = this.client.newGroup()
+
+    for (const txn of transactions) {
+      // probably lossy. what else is missing?
+      const { fee, firstValid, lastValid, } = txn
+      const createArgs = {
+        approvalProgram: Buffer.from(APP_SPEC.byteCode!.approval, 'base64'),
+        clearProgram: Buffer.from(APP_SPEC.byteCode!.clear, 'base64'),
+        numGlobalByteSlices: APP_SPEC.state.schema.global.bytes,
+        numGlobalInts: APP_SPEC.state.schema.global.ints,
+        numLocalByteSlices: APP_SPEC.state.schema.local.bytes,
+        numLocalInts: APP_SPEC.state.schema.local.ints,
+        onComplete: OnApplicationComplete.NoOpOC,
+        sender: this.readerAccount,
+        suggestedParams: { ...suggestedParams, firstValid, lastValid, flatFee: true, fee},
+        appArgs: txn.applicationCall!.appArgs as Uint8Array[],
+      }
+      builder = builder.addTransaction(makeApplicationCreateTxnFromObject(createArgs), emptySigner)
+    }
+
+    const { confirmations } = await builder.simulate({
+      extraOpcodeBudget: 170_000,
+      allowMoreLogging: true,
+      allowEmptySignatures: true,
+      allowUnnamedResources: true,
+      ...extraSimulateArgs,
+    })
+
+    const logs = confirmations.flatMap(({ logs }, i) => {
+      if (!logs) throw new Error(`logs were not returned from simulate txn ${i}. this should never happen`)
+      return logs.slice(0, -1)
+    })
+
+    const specRetObj = this.client.appSpec.methods.find(({ name }) => name === methodName)?.returns
+    if (!specRetObj) throw new Error('Method not found in app spec')
+
+    const retTypeStr = specRetObj.struct ?? specRetObj.type
+    const retData: T[] = []
+    
+    for (let i = 0; i < logs.length; i++) {
+      retData.push(getABIDecodedValue(new Uint8Array(logs[i]), retTypeStr, this.factory.appSpec.structs) as T)
+    }
+
+    return retData
+  }
+}
+
+export class {{ARC56_NAME}}SDK extends GhostBase {
+  constructor(args: ConstructorParameters<typeof GhostBase>[0]) {
+    super(args)
+  }
+
+{{METHODS}}
+}
+
+/* END GHOST SDK CODE */

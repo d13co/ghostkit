@@ -1,0 +1,18 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "declaration": true,
+    "emitDeclarationOnly": false,
+    "moduleResolution": "Node",
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "strict": true,
+    "sourceMap": true,
+    "rootDir": "src",
+    "skipLibCheck": true,
+    "outDir": "dist",
+    "module": "CommonJS"
+  },
+  "include": ["src"],
+  "exclude": ["**/@types/service-worker-mock/**"]
+}

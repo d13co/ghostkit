@@ -1,0 +1,17 @@
+  async {{METHOD_NAME}}(
+    argsOrArgsArray: Methods['{{METHOD_NAME}}']['argsObj'] | Methods['{{METHOD_NAME}}']['argsObj'][],
+    extraMethodCallArgs?: ExtraMethodCallArgs,
+    extraSimulateArgs?: RawSimulateOptions,
+  ): Promise<Methods['{{METHOD_NAME}}']['returns'][]> {
+    await this.getAndCacheSuggestedParams()
+    let builder: {{ARC56_NAME}}Composer<any> = await this.client.newGroup()
+    if (Array.isArray(argsOrArgsArray))
+      for (const args of argsOrArgsArray) builder = builder.{{METHOD_NAME}}({ args, ...extraMethodCallArgs })
+    else builder = builder.{{METHOD_NAME}}({ args: argsOrArgsArray, ...extraMethodCallArgs })
+    const { transactions } = await (await builder.composer()).buildTransactions()
+    return this.execute({
+      transactions,
+      signature: '{{METHOD_SIGNATURE}}',
+      extraSimulateArgs,
+    })
+  }
