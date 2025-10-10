@@ -1,8 +1,8 @@
 # Ghostkit & Ghost contracts on Algorand
 
-Ghost contracts: Contracts that do not exist on chain. They are simulated (created on the fly) to return data efficiently from the AVM.
+Ghost contracts: Contracts that do not exist on chain. They are simulated (created on the fly) to return data efficiently from the AVM. [Example puya-ts repo](https://github.com/d13co/ghostofavm).
 
-Ghostkit: toy to generate client SDKs for Ghost contracts from ARC-56 specs.
+[Ghostkit](https://github.com/d13co/ghostkit): toy to generate client SDKs for Ghost contracts from ARC-56 specs.
 
 ## Why?
 
