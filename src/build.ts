@@ -30,11 +30,11 @@ export async function buildGhostSDK(appSpecPath: string) {
     const supportsCreate = method.actions.create.includes("NoOp");
     if (!supportsCreate) {
       throw new Error(
-        `Method ${method.name} does not support creation calls. Decorate it with \`@abimethod({ readonly: true, onCreate: 'require' })\``,
+        `Method ${method.name} does not support creation calls. Decorate it with \`@abimethod({ readonly: true, onCreate: 'allow' })\``,
       );
     }
     if (!method.readonly) {
-      throw new Error(`Method ${method.name} is not readonly. Decorate it with \`@abimethod({ readonly: true, onCreate: 'require' })\``);
+      throw new Error(`Method ${method.name} is not readonly. Decorate it with \`@abimethod({ readonly: true, onCreate: 'allow' })\``);
     }
 
     const methodName = method.name;

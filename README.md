@@ -42,7 +42,7 @@ Ghost contracts in this repo are written in puya-ts. puya-py should also work.
 
 All ABI methods:
 
-- must support OnCreate 
+- must support OnCreate (use `onCreate: 'allow'`)
 - must be marked read-only
 
 **Note: The return type of the ABI method is used by the SDK as a hint for decoding the logged data.** The actual value returned by the method is ignored by the SDK, but a return statement is required to satisfy the function signature.
@@ -52,7 +52,7 @@ All ABI methods:
 This method logs the timestamps of blocks between `firstRound` and `lastRound`, inclusive:
 
 ```typescript
-@abimethod({ readonly: true, onCreate: 'require' })
+@abimethod({ readonly: true, onCreate: 'allow' })
 public blkTimestamp(firstRound: uint64, lastRound: uint64): uint64 {
   for (let round: uint64 = firstRound; round <= lastRound; round++) {
     log(op.Block.blkTimestamp(round))
@@ -75,7 +75,7 @@ type BlkData = {
   proposer: Account
 }
 
-@abimethod({ readonly: true, onCreate: 'require' })
+@abimethod({ readonly: true, onCreate: 'allow' })
 public blkData(firstRound: uint64, lastRound: uint64): BlkData {
   for (let round: uint64 = firstRound; round <= lastRound; round++) {
     const blkData: BlkData = {
@@ -110,7 +110,7 @@ Here is how to initialize the SDK:
 
 ```typescript
 import { AlgorandClient } from '@algorandfoundation/algokit-utils'
-import { GhostofavmSDK } from '../smart_contracts/artifacts/ghostofavm/GhostofavmSDK';
+import { GhostofavmSDK } from './examples/GhostofavmSDK' // or wherever your generated ghostkit SDK lives
 
 const algorand = AlgorandClient.mainNet()
 const ghostSDK = new GhostofavmSDK({ algorand })
@@ -121,23 +121,24 @@ Your ABI methods will result in SDK method calls that wrap the ABI methods, with
 
 They will return an array of typed responses from your method, in the order that they were logged.
 
-```
-const data = await ghostSDK.blkTimestamp(
-  { firstRound: 1n, lastRound: 2n },
-  { firstValidRound: 3n, lastValidRound: 3n } // ExtraMethodCallArgs: Extra app call arguments, e.g. staticFee, etc.
+```typescript
+const data = await ghostSDK.blkTimestamp({
+  methodArgsOrArgsArray: { firstRound: 1n, lastRound: 2n },
+  extraMethodCallArgs: { firstValidRound: 3n, lastValidRound: 3n }
+  // ExtraMethodCallArgs: Extra app call arguments, e.g. staticFee, etc.
   // You usually won't need to set validity unless you're dealing with blocks.
-);
+})
 
 // data: [1759625702n, 1759625705n]
 ```
 
 Struct example:
 
-```
-const data = await ghostSDK.blkData(
-  { firstRound: 1n, lastRound: 2n },
-  { firstValidRound: 3n, lastValidRound: 3n }
-);
+```typescript
+const data = await ghostSDK.blkData({
+  methodArgsOrArgsArray: { firstRound: 1n, lastRound: 2n },
+  extraMethodCallArgs: { firstValidRound: 3n, lastValidRound: 3n }
+})
 
 /* data: [
  *   {
@@ -170,25 +171,26 @@ const data = await ghostSDK.blkData(
 You can create Ghost SDKs using the `ghostkit` npm module, which currently accepts the `build` command and a number of ARC-56 JSON spec files. It will create Ghost SDK files in the same directory as each spec file.
 
 ```bash
-$ npm run build:ghostkit
+$ npx ghostkit build examples/Ghostofavm.arc56.json
+# or node dist/bin.js build examples/Ghostofavm.arc56.json
 
-> smart_contracts@1.0.0 build:ghostkit
-> ghostkit build smart_contracts/artifacts/*/*.arc56.json
-
-[Ghostkit] Building smart_contracts/artifacts/ghostofavm/Ghostofavm.arc56.json... OK
-[Ghostkit] Built to: smart_contracts/artifacts/ghostofavm/GhostofavmSDK.ts
+[Ghostkit] Building examples/Ghostofavm.arc56.json... OK
+[Ghostkit] Built to: examples/GhostofavmSDK.ts
 ```
 
-You can also execute it directly with npx:
+You can also build multiple files at once by passing multiple paths:
 
 ```bash
-$ npx ghostkit build smart_contracts/artifacts/*/*.arc56.json
+$ npx ghostkit build path/to/contract1.arc56.json path/to/contract2.arc56.json
 
-[Ghostkit] Building smart_contracts/artifacts/ghostofavm/Ghostofavm.arc56.json... OK
-[Ghostkit] Built to: smart_contracts/artifacts/ghostofavm/GhostofavmSDK.ts
+[Ghostkit] Building path/to/contract1.arc56.json... OK
+[Ghostkit] Built to: path/to/contract1SDK.ts
+
+[Ghostkit] Building path/to/contract2.arc56.json... OK
+[Ghostkit] Built to: path/to/contract2SDK.ts
 ```
 
-Note: this project is set up to automatically generate the ghostofavm Ghost SDK when you build the ghostofavm algokit project.
+Note: The SDK will be generated in the same directory as the ARC-56 JSON file. See the `examples/` directory for a complete example.
 
 ### Install ghostkit
 
