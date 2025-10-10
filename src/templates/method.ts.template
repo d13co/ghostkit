@@ -1,15 +1,19 @@
-  async {{METHOD_NAME}}(
-    argsOrArgsArray: Methods['{{METHOD_NAME}}']['argsObj'] | Methods['{{METHOD_NAME}}']['argsObj'][],
-    extraMethodCallArgs?: ExtraMethodCallArgs,
-    extraSimulateArgs?: RawSimulateOptions,
-  ): Promise<Methods['{{METHOD_NAME}}']['returns'][]> {
+  async {{METHOD_NAME}}({
+    methodArgsOrArgsArray,
+    extraMethodCallArgs,
+    extraSimulateArgs,
+  }: {
+    methodArgsOrArgsArray: Methods['{{METHOD_NAME}}']['argsObj'] | Methods['{{METHOD_NAME}}']['argsObj'][]
+    extraMethodCallArgs?: ExtraMethodCallArgs
+    extraSimulateArgs?: RawSimulateOptions
+  }): Promise<Methods['{{METHOD_NAME}}']['returns'][]> {
     return this.execute({
       signature: '{{METHOD_SIGNATURE}}',
       txnBuilder: (
         builder: {{ARC56_NAME}}Composer<any>,
         args: CallParams<{{ARC56_NAME}}Args['obj']['{{METHOD_SIGNATURE}}']>,
       ) => builder.{{METHOD_NAME}}(args),
-      argsOrArgsArray,
+      methodArgsOrArgsArray,
       extraMethodCallArgs,
       extraSimulateArgs,
     })

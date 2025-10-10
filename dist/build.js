@@ -40,7 +40,7 @@ async function buildGhostSDK(appSpecPath) {
             .replace(new RegExp("{{ARC56_NAME}}", "g"), name);
         methodPieces.push(methodString);
     }
-    const methodString = methodPieces.join("\n");
+    const methodString = methodPieces.join("\n\n");
     const final = pieces.join("\n").replace(new RegExp("{{METHODS}}", "g"), methodString);
     const outputFilepath = (0, path_1.join)((0, path_1.dirname)(appSpecPath), `${name}SDK.ts`);
     (0, fs_1.writeFileSync)(outputFilepath, final);

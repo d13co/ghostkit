@@ -49,7 +49,7 @@ export async function buildGhostSDK(appSpecPath: string) {
 
     methodPieces.push(methodString);
   }
-  const methodString = methodPieces.join("\n");
+  const methodString = methodPieces.join("\n\n");
   const final = pieces.join("\n").replace(new RegExp("{{METHODS}}", "g"), methodString);
 
   const outputFilepath = join(dirname(appSpecPath), `${name}SDK.ts`)

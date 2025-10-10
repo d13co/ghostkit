@@ -2,7 +2,7 @@
 
 import { getABIDecodedValue } from '@algorandfoundation/algokit-utils/types/app-arc56'
 import { CommonAppCallParams } from '@algorandfoundation/algokit-utils/types/composer'
-import { makeEmptyTransactionSigner, makeApplicationCreateTxnFromObject } from 'algosdk'
+import { makeEmptyTransactionSigner } from 'algosdk'
 
 const emptySigner = makeEmptyTransactionSigner()
 
@@ -13,7 +13,7 @@ type Methods = {{ARC56_NAME}}Types['methods']
 class GhostBase {
   static factory = {{ARC56_NAME}}Factory
   static client = {{ARC56_NAME}}Client
-  
+
   public algorand: AlgorandClient
   public readerAccount = 'A7NMWS3NT3IUDMLVO26ULGXGIIOUQ3ND2TXSER6EBGRZNOBOUIQXHIBGDE' // non-mainnet fee sink
   public factory: {{ARC56_NAME}}Factory
@@ -38,13 +38,13 @@ class GhostBase {
   protected async execute<T>({
     signature,
     txnBuilder,
-    argsOrArgsArray,
+    methodArgsOrArgsArray,
     extraMethodCallArgs,
     extraSimulateArgs,
   }: {
     signature: string
     txnBuilder: (builder: {{ARC56_NAME}}Composer<any>, args: any /* TODO */) => {{ARC56_NAME}}Composer<any>
-    argsOrArgsArray: any
+    methodArgsOrArgsArray: any
     extraMethodCallArgs?: ExtraMethodCallArgs
     extraSimulateArgs?: RawSimulateOptions
   }): Promise<T[]> {
@@ -53,7 +53,7 @@ class GhostBase {
 
     // Avoiding .createTransaction because it compiles on the fly (why?). build app args and convert to app create
     let throwawayBuilder: {{ARC56_NAME}}Composer<any> = this.client.newGroup()
-    const argsArray = Array.isArray(argsOrArgsArray) ? argsOrArgsArray : [argsOrArgsArray]
+    const argsArray = Array.isArray(methodArgsOrArgsArray) ? methodArgsOrArgsArray : [methodArgsOrArgsArray]
     for (const args of argsArray) {
       throwawayBuilder = txnBuilder(throwawayBuilder, { args, signer: emptySigner, ...extraMethodCallArgs })
     }
