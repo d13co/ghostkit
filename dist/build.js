@@ -25,10 +25,10 @@ async function buildGhostSDK(appSpecPath) {
     for (const method of methods) {
         const supportsCreate = method.actions.create.includes("NoOp");
         if (!supportsCreate) {
-            throw new Error(`Method ${method.name} does not support creation calls. Decorate it with \`@abimethod({ readonly: true, onCreate: 'require' })\``);
+            throw new Error(`Method ${method.name} does not support creation calls. Decorate it with \`@abimethod({ readonly: true, onCreate: 'allow' })\``);
         }
         if (!method.readonly) {
-            throw new Error(`Method ${method.name} is not readonly. Decorate it with \`@abimethod({ readonly: true, onCreate: 'require' })\``);
+            throw new Error(`Method ${method.name} is not readonly. Decorate it with \`@abimethod({ readonly: true, onCreate: 'allow' })\``);
         }
         const methodName = method.name;
         const abiMethod = new algosdk_1.ABIMethod(method);
@@ -46,32 +46,4 @@ async function buildGhostSDK(appSpecPath) {
     (0, fs_1.writeFileSync)(outputFilepath, final);
     return outputFilepath;
 }
-// const client = readFileSync('scripts/artifacts/GhostofavmClient.ts').toString()
-// const appSpec = JSON.parse(readFileSync('scripts/artifacts/Ghostofavm.arc56.json').toString())
-// const { name } = appSpec
-// built += template.replace(/\{\{ARC56_NAME\}\}/g, name)
-// let methodStr: string[] = []
-// for (const method of appSpec.methods) {
-//   const supportsCreate = method.actions.create.includes('NoOp')
-//   if (!supportsCreate) {
-//     throw new Error(
-//       `Method ${method.name} does not support creation calls. Decorate it with \`@abimethod({ readonly: true, onCreate: 'require' })\``,
-//     )
-//   }
-//   if (!method.readonly) {
-//     throw new Error(
-//       `Method ${method.name} is not readonly. Decorate it with \`@abimethod({ readonly: true, onCreate: 'require' })\``,
-//     )
-//   }
-//   const methodName = method.name
-//   const abiMethod = new ABIMethod(method)
-//   const methodSignature = abiMethod.getSignature()
-//   console.log({ methodName, methodSignature })
-//   methodStr.push(
-//     methodTemplate.replace(/\{\{\METHOD_NAME}\}/g, methodName).replace(/\{\{\METHOD_SIGNATURE}\}/g, methodSignature),
-//   )
-// }
-// built = built.replace(/{{METHODS}}/, methodStr.join('\n'))
-// writeFileSync('src/index.ts', built)
-// console.log(`export class ${name}Client`)
 //# sourceMappingURL=build.js.map

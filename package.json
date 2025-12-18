@@ -1,6 +1,6 @@
 {
   "name": "ghostkit",
-  "version": "0.0.1-4",
+  "version": "0.0.2",
   "description": "",
   "files": [
     "dist/"
@@ -16,13 +16,14 @@
   "author": "",
   "license": "ISC",
   "devDependencies": {
-    "@algorandfoundation/algokit-client-generator": "=6.0.0",
+    "@algorandfoundation/algokit-client-generator": "^6.0.0",
     "@types/node": "^24.7.1",
     "concurrently": "=9.2.1",
     "copyfiles": "=2.4.1",
     "typescript": "=5.9.3"
   },
   "dependencies": {
-    "@algorandfoundation/algokit-utils": "^9.1.2"
+    "@algorandfoundation/algokit-utils": "^9.1.2",
+    "algosdk": "^3.5.2"
   }
 }

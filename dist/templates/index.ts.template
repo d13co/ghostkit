@@ -16,22 +16,34 @@ class GhostBase {
 
   public algorand: AlgorandClient
   public readerAccount = 'A7NMWS3NT3IUDMLVO26ULGXGIIOUQ3ND2TXSER6EBGRZNOBOUIQXHIBGDE' // non-mainnet fee sink
+  public ghostAppId?: bigint
   public factory: {{ARC56_NAME}}Factory
   protected client: {{ARC56_NAME}}Client
   public cacheParamsTimeout = 75 // ms
 
-  constructor({ algorand, readerAccount }: { algorand: AlgorandClient; readerAccount?: string }) {
+  constructor({
+    algorand,
+    readerAccount,
+    ghostAppId,
+  }: {
+    algorand: AlgorandClient
+    readerAccount?: string
+    ghostAppId?: bigint
+  }) {
     this.algorand = algorand
     if (readerAccount) this.readerAccount = readerAccount
     this.factory = this.algorand.client.getTypedAppFactory({{ARC56_NAME}}Factory, {
       defaultSender: this.readerAccount,
     })
-    this.client = this.factory.getAppClientById({ appId: 1n })
+    this.ghostAppId = ghostAppId
+    this.client = this.factory.getAppClientById({ appId: ghostAppId ?? 13n })
   }
 
   protected async getAndCacheSuggestedParams() {
     const suggestedParams = await this.algorand.getSuggestedParams()
-    this.algorand.setSuggestedParamsCache(suggestedParams, new Date(Date.now() + this.cacheParamsTimeout))
+    if (this.cacheParamsTimeout) {
+      this.algorand.setSuggestedParamsCache(suggestedParams, new Date(Date.now() + this.cacheParamsTimeout))
+    }
     return suggestedParams
   }
 
@@ -51,28 +63,37 @@ class GhostBase {
     await this.getAndCacheSuggestedParams()
     const methodName = signature.slice(0, signature.indexOf('('))
 
-    // Avoiding .createTransaction because it compiles on the fly (why?). build app args and convert to app create
-    let throwawayBuilder: {{ARC56_NAME}}Composer<any> = this.client.newGroup()
-    const argsArray = Array.isArray(methodArgsOrArgsArray) ? methodArgsOrArgsArray : [methodArgsOrArgsArray]
-    for (const args of argsArray) {
-      throwawayBuilder = txnBuilder(throwawayBuilder, { args, signer: emptySigner, ...extraMethodCallArgs })
-    }
-    const { transactions } = await (await throwawayBuilder.composer()).buildTransactions()
-
     let builder: {{ARC56_NAME}}Composer<any> = this.client.newGroup()
-    // convert to app creates, copy to new builder
-    for (const txn of transactions) {
-      // @ts-ignore
-      txn.applicationCall = {
-        ...txn.applicationCall,
-        appIndex: 0,
-        approvalProgram: Buffer.from(APP_SPEC.byteCode!.approval, 'base64'),
-        clearProgram: Buffer.from(APP_SPEC.byteCode!.clear, 'base64'),
-        numGlobalByteSlices: APP_SPEC.state.schema.global.bytes,
-        numGlobalInts: APP_SPEC.state.schema.global.ints,
-        numLocalByteSlices: APP_SPEC.state.schema.local.bytes,
-        numLocalInts: APP_SPEC.state.schema.local.ints,
-        builder: builder.addTransaction(txn, emptySigner),
+    if (this.ghostAppId) {
+      // deployed variant, we can call directly
+      const argsArray = Array.isArray(methodArgsOrArgsArray) ? methodArgsOrArgsArray : [methodArgsOrArgsArray]
+      for (const args of argsArray) {
+        builder = txnBuilder(builder, { args, signer: emptySigner, ...extraMethodCallArgs })
+      }
+    } else {
+      // ghost variant
+      // Avoiding .createTransaction because it compiles on the fly (why?). build app args and convert to app create
+      let throwawayBuilder: {{ARC56_NAME}}Composer<any> = this.client.newGroup()
+      const argsArray = Array.isArray(methodArgsOrArgsArray) ? methodArgsOrArgsArray : [methodArgsOrArgsArray]
+      for (const args of argsArray) {
+        throwawayBuilder = txnBuilder(throwawayBuilder, { args, signer: emptySigner, ...extraMethodCallArgs })
+      }
+      const { transactions } = await (await throwawayBuilder.composer()).buildTransactions()
+
+      // convert to app creates, copy to new real builder
+      for (const txn of transactions) {
+        // @ts-ignore
+        txn.applicationCall = {
+          ...txn.applicationCall,
+          appIndex: 0,
+          approvalProgram: Buffer.from(APP_SPEC.byteCode!.approval, 'base64'),
+          clearProgram: Buffer.from(APP_SPEC.byteCode!.clear, 'base64'),
+          numGlobalByteSlices: APP_SPEC.state.schema.global.bytes,
+          numGlobalInts: APP_SPEC.state.schema.global.ints,
+          numLocalByteSlices: APP_SPEC.state.schema.local.bytes,
+          numLocalInts: APP_SPEC.state.schema.local.ints,
+        }
+        builder = builder.addTransaction(txn, emptySigner)
       }
     }
 
