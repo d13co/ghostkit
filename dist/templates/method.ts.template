@@ -4,7 +4,7 @@
     extraSimulateArgs,
   }: {
     methodArgsOrArgsArray: Methods['{{METHOD_NAME}}']['argsObj'] | Methods['{{METHOD_NAME}}']['argsObj'][]
-    extraMethodCallArgs?: ExtraMethodCallArgs
+    extraMethodCallArgs?: ExtraMethodCallArgs | ExtraMethodCallArgs[]
     extraSimulateArgs?: RawSimulateOptions
   }): Promise<Methods['{{METHOD_NAME}}']['returns'][]> {
     return this.execute({

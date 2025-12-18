@@ -57,7 +57,7 @@ class GhostBase {
     signature: string
     txnBuilder: (builder: {{ARC56_NAME}}Composer<any>, args: any /* TODO */) => {{ARC56_NAME}}Composer<any>
     methodArgsOrArgsArray: any
-    extraMethodCallArgs?: ExtraMethodCallArgs
+    extraMethodCallArgs?: ExtraMethodCallArgs | ExtraMethodCallArgs[]
     extraSimulateArgs?: RawSimulateOptions
   }): Promise<T[]> {
     await this.getAndCacheSuggestedParams()
@@ -67,16 +67,20 @@ class GhostBase {
     if (this.ghostAppId) {
       // deployed variant, we can call directly
       const argsArray = Array.isArray(methodArgsOrArgsArray) ? methodArgsOrArgsArray : [methodArgsOrArgsArray]
-      for (const args of argsArray) {
-        builder = txnBuilder(builder, { args, signer: emptySigner, ...extraMethodCallArgs })
+      for (let i=0; i < argsArray.length; i++) {
+        const args = argsArray[i]
+        const extra = Array.isArray(extraMethodCallArgs) ? extraMethodCallArgs[i] : extraMethodCallArgs
+        builder = txnBuilder(builder, { args, signer: emptySigner, ...extra })
       }
     } else {
       // ghost variant
       // Avoiding .createTransaction because it compiles on the fly (why?). build app args and convert to app create
       let throwawayBuilder: {{ARC56_NAME}}Composer<any> = this.client.newGroup()
       const argsArray = Array.isArray(methodArgsOrArgsArray) ? methodArgsOrArgsArray : [methodArgsOrArgsArray]
-      for (const args of argsArray) {
-        throwawayBuilder = txnBuilder(throwawayBuilder, { args, signer: emptySigner, ...extraMethodCallArgs })
+      for (let i=0; i < argsArray.length; i++) {
+        const args = argsArray[i]
+        const extra = Array.isArray(extraMethodCallArgs) ? extraMethodCallArgs[i] : extraMethodCallArgs
+        throwawayBuilder = txnBuilder(throwawayBuilder, { args, signer: emptySigner, ...extra })
       }
       const { transactions } = await (await throwawayBuilder.composer()).buildTransactions()
 
