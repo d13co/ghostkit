@@ -96,6 +96,7 @@ class GhostBase {
           numGlobalInts: APP_SPEC.state.schema.global.ints,
           numLocalByteSlices: APP_SPEC.state.schema.local.bytes,
           numLocalInts: APP_SPEC.state.schema.local.ints,
+          extraPages: 3,
         }
         builder = builder.addTransaction(txn, emptySigner)
       }
