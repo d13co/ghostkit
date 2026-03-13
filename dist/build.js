@@ -6,12 +6,18 @@ const fs_1 = require("fs");
 const path_1 = require("path");
 const generate_client_1 = require("./generate-client");
 const algokit_client_generator_1 = require("@algorandfoundation/algokit-client-generator");
+const change_case_1 = require("change-case");
 const templatesBaseDir = (0, path_1.join)(__dirname, "templates");
 function getTemplate(filename) {
     return (0, fs_1.readFileSync)((0, path_1.join)(templatesBaseDir, filename)).toString();
 }
 function unexportClient(client, name) {
     return client.replace(`export class ${name}Client`, `class ${name}Client`).replace(`export class ${name}Factory`, `class ${name}Factory`);
+}
+const replaceInvalidWithUnderscore = (value) => value.replace(/[^a-z0-9_$]+/gi, '_');
+function makeSafeMethodIdentifier(value) {
+    const options = value.startsWith('_') ? { prefixCharacters: '_' } : {};
+    return (0, change_case_1.camelCase)(replaceInvalidWithUnderscore(value), options);
 }
 async function buildGhostSDK(appSpecPath) {
     const appSpec = await (0, algokit_client_generator_1.loadApplicationJson)(appSpecPath);
@@ -33,9 +39,11 @@ async function buildGhostSDK(appSpecPath) {
         const methodName = method.name;
         const abiMethod = new algosdk_1.ABIMethod(method);
         const methodSignature = abiMethod.getSignature();
+        const safeMethodName = makeSafeMethodIdentifier(methodName);
         // console.log({ methodName, methodSignature });
         const methodString = methodTemplate
-            .replace(new RegExp("{{METHOD_NAME}}", "g"), methodName)
+            .replace(new RegExp("{{ORIGINAL_METHOD_NAME}}", "g"), methodName)
+            .replace(new RegExp("{{SAFE_METHOD_NAME}}", "g"), safeMethodName)
             .replace(new RegExp("{{METHOD_SIGNATURE}}", "g"), methodSignature)
             .replace(new RegExp("{{ARC56_NAME}}", "g"), name);
         methodPieces.push(methodString);
