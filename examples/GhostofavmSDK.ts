@@ -1213,7 +1213,7 @@ export type GhostofavmComposerResults<TReturns extends [...any[]]> = Expand<Send
 
 import { getABIDecodedValue } from '@algorandfoundation/algokit-utils/types/app-arc56'
 import { CommonAppCallParams } from '@algorandfoundation/algokit-utils/types/composer'
-import { makeEmptyTransactionSigner } from 'algosdk'
+import { ABIMethod, makeEmptyTransactionSigner } from 'algosdk'
 
 const emptySigner = makeEmptyTransactionSigner()
 
@@ -1338,8 +1338,8 @@ class GhostBase {
       return logs.slice(0, -1)
     })
 
-    const specRetObj = this.client.appSpec.methods.find(({ name }) => name === methodName)?.returns
-    if (!specRetObj) throw new Error('Method not found in app spec')
+    const specRetObj = this.client.appSpec.methods.find((m) => new ABIMethod(m).getSignature() === signature)?.returns
+    if (!specRetObj) throw new Error(`Method not found in app spec: ${signature}`)
 
     const retTypeStr = specRetObj.struct ?? specRetObj.type
     const retData: T[] = []
