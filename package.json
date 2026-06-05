@@ -1,6 +1,6 @@
 {
   "name": "ghostkit",
-  "version": "0.0.5",
+  "version": "0.0.6",
   "description": "",
   "files": [
     "dist/"
@@ -8,9 +8,18 @@
   "bin": {
     "ghostkit": "dist/bin.js"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/d13co/ghostkit.git"
+  },
+  "bugs": {
+    "url": "https://github.com/d13co/ghostkit/issues"
+  },
+  "homepage": "https://github.com/d13co/ghostkit#readme",
   "scripts": {
     "build": "tsc",
-    "postbuild": "copyfiles -f src/templates/* dist/templates/",
+    "postbuild": "copyfiles -f src/templates/* dist/templates/ && npm run build:example",
+    "build:example": "node dist/bin.js build examples/Ghostofavm.arc56.json",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "author": "",

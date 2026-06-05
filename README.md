@@ -4,21 +4,27 @@ Ghost contracts: Contracts that do not exist on chain. They are simulated (creat
 
 [Ghostkit](https://github.com/d13co/ghostkit): toy to generate client SDKs for Ghost contracts from ARC-56 specs.
 
+### Example uses
+
+SDKs built with Ghostkit, useful as real-world references:
+
+- [reti-ghost-sdk](https://github.com/d13co/reti-ghost-sdk) — read Réti staking pool data in bulk.
+- [abel-ghost-sdk](https://github.com/d13co/abel-ghost-sdk) — bulk account/asset reads with input chunking (`@chunked` decorator, see [Chunking large inputs](#chunking-large-inputs)).
+- [algo-metrics-sdk](https://github.com/d13co/algo-metrics-sdk) — derive chain metrics from block data in bulk.
+
 ## Why?
 
 ### Why AVM code from client?
 
 In AVM context, you have access to a lot resources that can be fetched/filtered/combined with a single simulate:
 
-- 128x apps, assets, accounts*
+- 128x apps, assets, accounts
   - e.g. get asset or app information in bulk
   - e.g. get account balances for ALGO or assets in bulk
   - e.g. call ABI read methods of deployed apps and combine in interesting ways
 
 - 1000x blocks
   - e.g. timestamp + txn counter to calculate TPS
-
-_* You can simulate with 128x account references instead of the usual 64x for real calls_
 
 ### Why ghost contract?
 
@@ -105,6 +111,10 @@ It exposes an SDK that accepts the following parameters:
   - Optional. Sets the account from which to simulate the app calls.
     - Must be funded.
     - Defaults to the testnet fee sink, which should be funded on all public Algorand networks, as well as on localnet.
+- ghostAppId?: bigint
+  - Optional. If set, calls are made against this deployed application instead of a ghost (simulated) contract. See [Why ghost contract?](#why-ghost-contract) for the trade-offs.
+- debug?: boolean
+  - Optional. Defaults to `false`. When enabled, each SDK call logs diagnostics to the console (see [Debugging](#debugging)).
 
 Here is how to initialize the SDK:
 
@@ -157,13 +167,59 @@ const data = await ghostSDK.blkData({
  */
 ```
 
+### Chunking large inputs
+
+`methodArgsOrArgsArray` accepts **either a single args object or an array of them**. When you pass an array, each entry becomes a separate app call within the _same_ simulate, and the decoded results are concatenated in order. This is how you stay under the AVM limits while fetching everything in one round trip.
+
+Two limits force you to chunk:
+
+- **App args < 2KB per app call.** All of a single app call's ABI arguments must fit in ~2KB. For an `address[]`, each address is 32 bytes, so a single app call tops out at 63 accounts (`63 × 32 = 2016`, not 64 because the ABI method selector also takes space.)
+- **128 foreign references per simulate.** Across the whole simulate you can reference at most 128 accounts/assets/apps.
+
+So for an `address[]` input you split it into chunks of 63 and pass them as an array. For example, 128 accounts could be split `63, 63, 2` (three app calls) — but each extra app call adds overhead, so it may be better to cap at `126` and do `63, 63` (two app calls) rather than spend a third app call on just 2 extra outputs. You can test this for your use case with debug mode.
+
+```typescript
+// helper: split an array into fixed-size chunks
+const chunk = <T>(arr: T[], size: number): T[][] =>
+  Array.from({ length: Math.ceil(arr.length / size) }, (_, i) => arr.slice(i * size, i * size + size))
+
+// 126 accounts -> [63, 63] -> two app calls in one simulate
+const accounts: string[] = /* up to 126 addresses */ []
+const methodArgsOrArgsArray = chunk(accounts, 63).map((accounts) => ({ accounts }))
+
+const data = await ghostSDK.acctBalanceData({ methodArgsOrArgsArray })
+// data is the flattened results across both app calls, in input order
+```
+
+The SDK does not chunk for you — you are responsible for splitting inputs to respect both limits. See [`abel-ghost-sdk`'s `index.ts`](https://github.com/d13co/abel-ghost-sdk) for an example that wraps these methods with a `@chunked(126)` decorator and the `63`-sized inner chunking shown above.
+
+### Debugging
+
+Pass `debug: true` when constructing the SDK to log per-call diagnostics to the console:
+
+```typescript
+const ghostSDK = new GhostofavmSDK({ algorand, debug: true })
+
+await ghostSDK.acctBalanceData({ methodArgsOrArgsArray: { accounts: [addr1, addr2, addr3] } })
+
+// [DEBUG] Ghostkit req=k3f9a1x2 target=ghost acctBalanceData txns=1 [[{"key":"accounts","value":3}]]
+// [DEBUG] Ghostkit req=k3f9a1x2 method=acctBalanceData simTime=42.10ms procTime=0.85ms totalTime=42.95ms
+```
+
+Each call emits two lines, correlated by an 8-character `req` id:
+
+- **Before simulate**: the `target` (`ghost` for a simulated contract, or the app id when `ghostAppId` is set), method name, number of transactions in the group (`txns`), and a per-call breakdown of argument counts (array args report their length).
+- **After decoding**: `simTime` (simulate round-trip), `procTime` (log decoding), and `totalTime`, in milliseconds.
+
+When `debug` is off (the default) there is zero overhead — no timing or logging code runs.
+
 ### Warnings and Limitations
 
 ⚠ **Warning: Alpha status**. This project is experimental, the API/SDK structure can be considered unstable, etc.
 
 ⚠ **Warning: You must enforce your own reference limits**. You can have 128 references in each app/SDK call, so manage your inputs accordingly.
 
-⚠ **Limitation: App args must be < 2KB**. A future version of this could attempt to figure out how to split your inputs into multiple grouped app calls, but currently each sdk call will be 1 app call to your abi method, so your inputs must respect the AVM 2KB app args limit. E.g. if you try to look up 128 accounts, you would run into this (128 x 32 = 4096.)
+⚠ **Limitation: App args must be < 2KB per app call**. Each app call's ABI arguments must respect the AVM 2KB app args limit. E.g. a single app call cannot look up 128 accounts (128 × 32 = 4096 bytes). The SDK does not split inputs for you, but you can pass an array to `methodArgsOrArgsArray` to spread a large input across multiple app calls in one simulate — see [Chunking large inputs](#chunking-large-inputs).
 
 
 ### Compiling

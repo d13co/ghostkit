@@ -1227,22 +1227,38 @@ class GhostBase {
 
   public algorand: AlgorandClient
   public readerAccount = 'A7NMWS3NT3IUDMLVO26ULGXGIIOUQ3ND2TXSER6EBGRZNOBOUIQXHIBGDE' // non-mainnet fee sink
+  public ghostAppId?: bigint
   public factory: GhostofavmFactory
   protected client: GhostofavmClient
   public cacheParamsTimeout = 75 // ms
+  public debug: boolean = false
 
-  constructor({ algorand, readerAccount }: { algorand: AlgorandClient; readerAccount?: string }) {
+  constructor({
+    algorand,
+    readerAccount,
+    ghostAppId,
+    debug
+  }: {
+    algorand: AlgorandClient
+    readerAccount?: string
+    ghostAppId?: bigint
+    debug?: boolean
+  }) {
     this.algorand = algorand
     if (readerAccount) this.readerAccount = readerAccount
     this.factory = this.algorand.client.getTypedAppFactory(GhostofavmFactory, {
       defaultSender: this.readerAccount,
     })
-    this.client = this.factory.getAppClientById({ appId: 1n })
+    this.ghostAppId = ghostAppId
+    this.client = this.factory.getAppClientById({ appId: ghostAppId ?? 13n })
+    this.debug = debug ?? false
   }
 
   protected async getAndCacheSuggestedParams() {
     const suggestedParams = await this.algorand.getSuggestedParams()
-    this.algorand.setSuggestedParamsCache(suggestedParams, new Date(Date.now() + this.cacheParamsTimeout))
+    if (this.cacheParamsTimeout) {
+      this.algorand.setSuggestedParamsCache(suggestedParams, new Date(Date.now() + this.cacheParamsTimeout))
+    }
     return suggestedParams
   }
 
@@ -1256,37 +1272,58 @@ class GhostBase {
     signature: string
     txnBuilder: (builder: GhostofavmComposer<any>, args: any /* TODO */) => GhostofavmComposer<any>
     methodArgsOrArgsArray: any
-    extraMethodCallArgs?: ExtraMethodCallArgs
+    extraMethodCallArgs?: ExtraMethodCallArgs | ExtraMethodCallArgs[]
     extraSimulateArgs?: RawSimulateOptions
   }): Promise<T[]> {
     await this.getAndCacheSuggestedParams()
     const methodName = signature.slice(0, signature.indexOf('('))
 
-    // Avoiding .createTransaction because it compiles on the fly (why?). build app args and convert to app create
-    let throwawayBuilder: GhostofavmComposer<any> = this.client.newGroup()
-    const argsArray = Array.isArray(methodArgsOrArgsArray) ? methodArgsOrArgsArray : [methodArgsOrArgsArray]
-    for (const args of argsArray) {
-      throwawayBuilder = txnBuilder(throwawayBuilder, { args, signer: emptySigner, ...extraMethodCallArgs })
-    }
-    const { transactions } = await (await throwawayBuilder.composer()).buildTransactions()
+    const debugInfo = this.debug ? { reqId: Math.random().toString(36).substring(2, 10), txns: 0, argCount: [] as any } : undefined
+    const debugCountArgs = (args: Record<string, any>) => debugInfo && debugInfo.argCount.push(Object.entries(args).map(([key, value]) => ({ key, value: Array.isArray(value) ? value.length : 1 })))
 
     let builder: GhostofavmComposer<any> = this.client.newGroup()
-    // convert to app creates, copy to new builder
-    for (const txn of transactions) {
-      // @ts-ignore
-      txn.applicationCall = {
-        ...txn.applicationCall,
-        appIndex: 0,
-        approvalProgram: Buffer.from(APP_SPEC.byteCode!.approval, 'base64'),
-        clearProgram: Buffer.from(APP_SPEC.byteCode!.clear, 'base64'),
-        numGlobalByteSlices: APP_SPEC.state.schema.global.bytes,
-        numGlobalInts: APP_SPEC.state.schema.global.ints,
-        numLocalByteSlices: APP_SPEC.state.schema.local.bytes,
-        numLocalInts: APP_SPEC.state.schema.local.ints,
-        builder: builder.addTransaction(txn, emptySigner),
+    if (this.ghostAppId) {
+      // deployed variant, we can call directly
+      const argsArray = Array.isArray(methodArgsOrArgsArray) ? methodArgsOrArgsArray : [methodArgsOrArgsArray]
+      for (let i=0; i < argsArray.length; i++) {
+        const args = argsArray[i]
+        if (debugInfo) debugCountArgs(args)
+        const extra = Array.isArray(extraMethodCallArgs) ? extraMethodCallArgs[i] : extraMethodCallArgs
+        builder = txnBuilder(builder, { args, signer: emptySigner, ...extra })
+      }
+    } else {
+      // ghost variant
+      // Avoiding .createTransaction because it compiles on the fly (why?). build app args and convert to app create
+      let throwawayBuilder: GhostofavmComposer<any> = this.client.newGroup()
+      const argsArray = Array.isArray(methodArgsOrArgsArray) ? methodArgsOrArgsArray : [methodArgsOrArgsArray]
+      for (let i=0; i < argsArray.length; i++) {
+        const args = argsArray[i]
+        if (debugInfo) debugCountArgs(args)
+        const extra = Array.isArray(extraMethodCallArgs) ? extraMethodCallArgs[i] : extraMethodCallArgs
+        throwawayBuilder = txnBuilder(throwawayBuilder, { args, signer: emptySigner, ...extra })
+      }
+      const { transactions } = await (await throwawayBuilder.composer()).buildTransactions()
+
+      // convert to app creates, copy to new real builder
+      for (const txn of transactions) {
+        // @ts-ignore
+        txn.applicationCall = {
+          ...txn.applicationCall,
+          appIndex: 0,
+          approvalProgram: Buffer.from(APP_SPEC.byteCode!.approval, 'base64'),
+          clearProgram: Buffer.from(APP_SPEC.byteCode!.clear, 'base64'),
+          numGlobalByteSlices: APP_SPEC.state.schema.global.bytes,
+          numGlobalInts: APP_SPEC.state.schema.global.ints,
+          numLocalByteSlices: APP_SPEC.state.schema.local.bytes,
+          numLocalInts: APP_SPEC.state.schema.local.ints,
+          extraPages: 3,
+        }
+        builder = builder.addTransaction(txn, emptySigner)
+        if (debugInfo) debugInfo.txns += 1
       }
     }
-
+    if (debugInfo) console.log(`[DEBUG] Ghostkit req=${debugInfo.reqId} target=${this.ghostAppId ?? "ghost"}`, methodName, `txns=${debugInfo.txns}`, JSON.stringify(debugInfo.argCount))
+    const simStartTime = debugInfo ? performance.now() : undefined
     const { confirmations } = await builder.simulate({
       extraOpcodeBudget: 170_000,
       allowMoreLogging: true,
@@ -1294,6 +1331,7 @@ class GhostBase {
       allowUnnamedResources: true,
       ...extraSimulateArgs,
     })
+    const simEndTime = debugInfo ? performance.now() : undefined
 
     const logs = confirmations.flatMap(({ logs }, i) => {
       if (!logs) throw new Error(`logs were not returned from simulate txn ${i}. this should never happen`)
@@ -1308,6 +1346,14 @@ class GhostBase {
 
     for (let i = 0; i < logs.length; i++) {
       retData.push(getABIDecodedValue(new Uint8Array(logs[i]), retTypeStr, this.factory.appSpec.structs) as T)
+    }
+
+    const procEndTime  = debugInfo ? performance.now() : undefined
+    if (debugInfo) {
+      const simDuration = (simEndTime! - simStartTime!).toFixed(2)
+      const procDuration = (procEndTime! - simEndTime!).toFixed(2)
+      const totalDuration = (procEndTime! - simStartTime!).toFixed(2)
+      console.log(`[DEBUG] Ghostkit req=${debugInfo.reqId} method=${methodName} simTime=${simDuration}ms procTime=${procDuration}ms totalTime=${totalDuration}ms`)
     }
 
     return retData
@@ -1325,7 +1371,7 @@ export class GhostofavmSDK extends GhostBase {
     extraSimulateArgs,
   }: {
     methodArgsOrArgsArray: Methods['blkTimestamp']['argsObj'] | Methods['blkTimestamp']['argsObj'][]
-    extraMethodCallArgs?: ExtraMethodCallArgs
+    extraMethodCallArgs?: ExtraMethodCallArgs | ExtraMethodCallArgs[]
     extraSimulateArgs?: RawSimulateOptions
   }): Promise<Methods['blkTimestamp']['returns'][]> {
     return this.execute({
@@ -1346,7 +1392,7 @@ export class GhostofavmSDK extends GhostBase {
     extraSimulateArgs,
   }: {
     methodArgsOrArgsArray: Methods['blkTxnCounter']['argsObj'] | Methods['blkTxnCounter']['argsObj'][]
-    extraMethodCallArgs?: ExtraMethodCallArgs
+    extraMethodCallArgs?: ExtraMethodCallArgs | ExtraMethodCallArgs[]
     extraSimulateArgs?: RawSimulateOptions
   }): Promise<Methods['blkTxnCounter']['returns'][]> {
     return this.execute({
@@ -1367,7 +1413,7 @@ export class GhostofavmSDK extends GhostBase {
     extraSimulateArgs,
   }: {
     methodArgsOrArgsArray: Methods['blkProposer']['argsObj'] | Methods['blkProposer']['argsObj'][]
-    extraMethodCallArgs?: ExtraMethodCallArgs
+    extraMethodCallArgs?: ExtraMethodCallArgs | ExtraMethodCallArgs[]
     extraSimulateArgs?: RawSimulateOptions
   }): Promise<Methods['blkProposer']['returns'][]> {
     return this.execute({
@@ -1388,7 +1434,7 @@ export class GhostofavmSDK extends GhostBase {
     extraSimulateArgs,
   }: {
     methodArgsOrArgsArray: Methods['blkData']['argsObj'] | Methods['blkData']['argsObj'][]
-    extraMethodCallArgs?: ExtraMethodCallArgs
+    extraMethodCallArgs?: ExtraMethodCallArgs | ExtraMethodCallArgs[]
     extraSimulateArgs?: RawSimulateOptions
   }): Promise<Methods['blkData']['returns'][]> {
     return this.execute({
@@ -1409,7 +1455,7 @@ export class GhostofavmSDK extends GhostBase {
     extraSimulateArgs,
   }: {
     methodArgsOrArgsArray: Methods['acctBalanceData']['argsObj'] | Methods['acctBalanceData']['argsObj'][]
-    extraMethodCallArgs?: ExtraMethodCallArgs
+    extraMethodCallArgs?: ExtraMethodCallArgs | ExtraMethodCallArgs[]
     extraSimulateArgs?: RawSimulateOptions
   }): Promise<Methods['acctBalanceData']['returns'][]> {
     return this.execute({
