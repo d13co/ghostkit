@@ -116,6 +116,8 @@ It exposes an SDK that accepts the following parameters:
 - debug?: boolean
   - Optional. Defaults to `false`. When enabled, each SDK call logs diagnostics to the console (see [Debugging](#debugging)).
 
+Each generated method also accepts per-call options — see [Extra method-call args](#extra-method-call-args-fees--validity) (`extraMethodCallArgs`) and [Simulate options](#simulate-options) (`extraSimulateArgs`).
+
 Here is how to initialize the SDK:
 
 ```typescript
@@ -167,6 +169,24 @@ const data = await ghostSDK.blkData({
  */
 ```
 
+### Extra method-call args (fees & validity)
+
+Every generated method takes an optional `extraMethodCallArgs`, a pass-through to algokit's `CommonAppCallParams` (with `appId`/`sender`/`method`/`args`/`onComplete` omitted — the SDK fills those in). So you can set `staticFee`, `extraFee`, `firstValidRound`, `lastValidRound`, `note`, lease, etc. on the underlying app call.
+
+**Funding inner app calls.** A ghost method that issues inner transactions (e.g. an inner ABI call into another app) must carry the fee budget for them on the outer call. Add one inner-transaction min fee per inner call via `extraFee`:
+
+```typescript
+// method makes one inner asset/app lookup per input — fund them all
+await ghostSDK.getAssetsTiny({
+  methodArgsOrArgsArray: { assetIds, abelAppId },
+  extraMethodCallArgs: { extraFee: (assetIds.length * 1000).microAlgo() }, // 1000 µAlgo each
+})
+```
+
+**Per-chunk form.** `extraMethodCallArgs` may be a single object (applied to every app call) or an **array aligned 1:1** with the array form of `methodArgsOrArgsArray` — the SDK uses `extraMethodCallArgs[i]` for the i-th app call. Use this to give each chunk its own fee or validity window.
+
+For the block-validity interplay with simulate rounds, see [Simulate options](#simulate-options).
+
 ### Chunking large inputs
 
 `methodArgsOrArgsArray` accepts **either a single args object or an array of them**. When you pass an array, each entry becomes a separate app call within the _same_ simulate, and the decoded results are concatenated in order. This is how you stay under the AVM limits while fetching everything in one round trip.
@@ -193,6 +213,70 @@ const data = await ghostSDK.acctBalanceData({ methodArgsOrArgsArray })
 
 The SDK does not chunk for you — you are responsible for splitting inputs to respect both limits. See [`abel-ghost-sdk`'s `index.ts`](https://github.com/d13co/abel-ghost-sdk) for an example that wraps these methods with a `@chunked(126)` decorator and the `63`-sized inner chunking shown above.
 
+### Simulate options
+
+Every method also takes an optional `extraSimulateArgs` (`RawSimulateOptions`). It is spread **over** the SDK's simulate defaults, so it can override any of them. The defaults are:
+
+- `extraOpcodeBudget: 170_000` — bulk loops burn opcodes; this buys headroom.
+- `allowMoreLogging: true` — results are returned as logs, so the per-app log limit is raised.
+- `allowEmptySignatures: true` — the reader account never actually signs.
+- `allowUnnamedResources: true` — foreign account/asset/app references are resolved automatically.
+
+**Reading block data.** The AVM `block` opcode restricts which rounds it can read based on the *transaction's validity window*: reading field F of block A fails unless A falls between `txn.LastValid - 1002` and `txn.FirstValid` (exclusive) — i.e. roughly the ~1000 rounds below `FirstValid`. So to read up to block `simRound`, push the call's validity above it (`firstValidRound = lastValidRound = simRound + 1`) so the target rounds sit just under `FirstValid` and inside the lookback. Set `extraSimulateArgs.round` to `simRound` so simulate evaluates the group with that (future-dated) validity window accepted rather than treating it as expired:
+
+```typescript
+const simRound = lastRound // the latest block you want to read
+await ghostSDK.blkData({
+  methodArgsOrArgsArray: { firstRound, lastRound },
+  extraMethodCallArgs: { firstValidRound: simRound + 1n, lastValidRound: simRound + 1n },
+  extraSimulateArgs: { round: simRound },
+})
+```
+
+### Calling deployed apps directly
+
+The generated `ghostSDK.method({...})` wrappers always simulate an on-the-fly create. When you instead want a normal read against an already-deployed app (standard ABI return, no ghost machinery), use the public `factory` field to get a typed `AppClient`:
+
+```typescript
+const { return: labels } = await ghostSDK.factory
+  .getAppClientById({ appId })
+  .send.getAssetLabels({ args: { assetId } })
+```
+
+`factory` is the underlying algokit-generated app factory, so the full typed client API is available for real deployed apps. (The SDK's own `client` is `protected` — go through `factory.getAppClientById(...)` instead.)
+
+### Mapping results to inputs
+
+Methods return a flat array of decoded results — one per logged element, in log order. To look results up by input, zip them back by index:
+
+```typescript
+const balances = await ghostSDK.acctBalanceData({ methodArgsOrArgsArray: { accounts } })
+const byAccount = new Map(accounts.map((addr, i) => [addr, balances[i]]))
+```
+
+Handle any contract sentinels while mapping — e.g. a method that returns the zero address for "not set" can be surfaced as `undefined`:
+
+```typescript
+new Map(accounts.map((addr, i) => [addr, auths[i] === ZERO_ADDRESS ? undefined : auths[i]]))
+```
+
+> **Note:** `debug` and `cacheParamsTimeout` are public fields re-read on every call, so you can toggle them on the instance at runtime, not just via the constructor. (`readerAccount` and `ghostAppId` are baked into the factory/client at construction — set those via the constructor.)
+
+### Suggested params caching
+
+Every call needs suggested transaction params. To avoid issuing a `getSuggestedParams` request to the node on every single call, the SDK primes the underlying `AlgorandClient` suggested-params cache after each fetch, so calls made in quick succession reuse the same params instead of hitting algod again.
+
+The window is controlled by the public `cacheParamsTimeout` field (milliseconds, default `75`):
+
+```typescript
+const ghostSDK = new GhostofavmSDK({ algorand })
+
+ghostSDK.cacheParamsTimeout = 1000 // cache for 1s
+ghostSDK.cacheParamsTimeout = 0    // disable caching — always fetch fresh params
+```
+
+Suggested params only change every few seconds (per block), so a short cache window saves redundant node requests when firing many reads back-to-back without meaningfully affecting validity windows. Bump it higher if you batch a lot of calls, or set it to `0` if you need fresh params on every call.
+
 ### Debugging
 
 Pass `debug: true` when constructing the SDK to log per-call diagnostics to the console:
@@ -202,14 +286,22 @@ const ghostSDK = new GhostofavmSDK({ algorand, debug: true })
 
 await ghostSDK.acctBalanceData({ methodArgsOrArgsArray: { accounts: [addr1, addr2, addr3] } })
 
-// [DEBUG] Ghostkit req=k3f9a1x2 target=ghost acctBalanceData txns=1 [[{"key":"accounts","value":3}]]
-// [DEBUG] Ghostkit req=k3f9a1x2 method=acctBalanceData simTime=42.10ms procTime=0.85ms totalTime=42.95ms
+// [DEBUG] Ghostkit pre id=k3f9a1x2 m=acctBalanceData target=ghost txns=1 [[{"accounts":3}]]
+// [DEBUG] Ghostkit post id=k3f9a1x2 m=acctBalanceData tSim=42.10ms tProc=0.85ms t=42.95ms
 ```
 
-Each call emits two lines, correlated by an 8-character `req` id:
+Each call emits two lines to stderr, correlated by an 8-character `id`:
 
-- **Before simulate**: the `target` (`ghost` for a simulated contract, or the app id when `ghostAppId` is set), method name, number of transactions in the group (`txns`), and a per-call breakdown of argument counts (array args report their length).
-- **After decoding**: `simTime` (simulate round-trip), `procTime` (log decoding), and `totalTime`, in milliseconds.
+- **`pre`** (before simulate) — `id`, `m` (method name), `target` (`ghost` for a simulated contract, or the app id when `ghostAppId` is set), `txns` (number of app calls in the group), and the argument-count breakdown as JSON.
+- **`post`** (after decoding) — `id`, `m`, and timings in milliseconds: `tSim` (simulate round-trip), `tProc` (log decoding), and `t` (total).
+
+The argument-count breakdown is one entry per app call in the group, each an object mapping arg name to its count — the array length for array args, or `1` if it is not an array arg. For the call above:
+
+```json
+[[{ "accounts": 3 }]]
+```
+
+i.e. a single app call whose `accounts` arg held 3 addresses. A chunked call of `63, 63` accounts would instead show two entries, each `{ "accounts": 63 }`.
 
 When `debug` is off (the default) there is zero overhead — no timing or logging code runs.
 

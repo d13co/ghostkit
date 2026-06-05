@@ -1279,7 +1279,7 @@ class GhostBase {
     const methodName = signature.slice(0, signature.indexOf('('))
 
     const debugInfo = this.debug ? { reqId: Math.random().toString(36).substring(2, 10), txns: 0, argCount: [] as any } : undefined
-    const debugCountArgs = (args: Record<string, any>) => debugInfo && debugInfo.argCount.push(Object.entries(args).map(([key, value]) => ({ key, value: Array.isArray(value) ? value.length : 1 })))
+    const debugCountArgs = (args: Record<string, any>) => debugInfo && debugInfo.argCount.push(Object.entries(args).map(([arg, value]) => ({ [arg]: Array.isArray(value) ? value.length : 1 })))
 
     let builder: GhostofavmComposer<any> = this.client.newGroup()
     if (this.ghostAppId) {
@@ -1322,7 +1322,7 @@ class GhostBase {
         if (debugInfo) debugInfo.txns += 1
       }
     }
-    if (debugInfo) console.log(`[DEBUG] Ghostkit req=${debugInfo.reqId} target=${this.ghostAppId ?? "ghost"}`, methodName, `txns=${debugInfo.txns}`, JSON.stringify(debugInfo.argCount))
+    if (debugInfo) console.warn(`[DEBUG] Ghostkit pre id=${debugInfo.reqId} m=${methodName} target=${this.ghostAppId ?? "ghost"} txns=${debugInfo.txns} ${JSON.stringify(debugInfo.argCount)}`)
     const simStartTime = debugInfo ? performance.now() : undefined
     const { confirmations } = await builder.simulate({
       extraOpcodeBudget: 170_000,
@@ -1353,7 +1353,7 @@ class GhostBase {
       const simDuration = (simEndTime! - simStartTime!).toFixed(2)
       const procDuration = (procEndTime! - simEndTime!).toFixed(2)
       const totalDuration = (procEndTime! - simStartTime!).toFixed(2)
-      console.log(`[DEBUG] Ghostkit req=${debugInfo.reqId} method=${methodName} simTime=${simDuration}ms procTime=${procDuration}ms totalTime=${totalDuration}ms`)
+      console.warn(`[DEBUG] Ghostkit post id=${debugInfo.reqId} m=${methodName} tSim=${simDuration}ms tProc=${procDuration}ms t=${totalDuration}ms`)
     }
 
     return retData
