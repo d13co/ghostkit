@@ -18,6 +18,7 @@
   "homepage": "https://github.com/d13co/ghostkit#readme",
   "scripts": {
     "build": "tsc",
+    "prepublishOnly": "npm run build",
     "postbuild": "copyfiles -f src/templates/* dist/templates/ && npm run build:example",
     "build:example": "node dist/bin.js build examples/Ghostofavm.arc56.json",
     "test": "echo \"Error: no test specified\" && exit 1"
