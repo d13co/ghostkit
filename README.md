@@ -113,6 +113,8 @@ It exposes an SDK that accepts the following parameters:
     - Defaults to the testnet fee sink, which should be funded on all public Algorand networks, as well as on localnet.
 - ghostAppId?: bigint
   - Optional. If set, calls are made against this deployed application instead of a ghost (simulated) contract. See [Why ghost contract?](#why-ghost-contract) for the trade-offs.
+- cacheParamsTimeout?: number
+  - Optional. Defaults to `75`. Milliseconds to cache suggested transaction params for; `0` disables caching (see [Suggested params caching](#suggested-params-caching)).
 - debug?: boolean
   - Optional. Defaults to `false`. When enabled, each SDK call logs diagnostics to the console (see [Debugging](#debugging)).
 
@@ -269,9 +271,9 @@ Every call needs suggested transaction params. To avoid issuing a `getSuggestedP
 The window is controlled by the public `cacheParamsTimeout` field (milliseconds, default `75`):
 
 ```typescript
-const ghostSDK = new GhostofavmSDK({ algorand })
+const ghostSDK = new GhostofavmSDK({ algorand, cacheParamsTimeout: 1000 }) // cache for 1s
 
-ghostSDK.cacheParamsTimeout = 1000 // cache for 1s
+ghostSDK.cacheParamsTimeout = 1000 // or set it at runtime
 ghostSDK.cacheParamsTimeout = 0    // disable caching — always fetch fresh params
 ```
 

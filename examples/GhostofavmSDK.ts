@@ -1238,14 +1238,17 @@ class GhostBase {
     algorand,
     readerAccount,
     ghostAppId,
+    cacheParamsTimeout,
     debug
   }: {
     algorand: AlgorandClient
     readerAccount?: string
     ghostAppId?: bigint
+    cacheParamsTimeout?: number
     debug?: boolean
   }) {
     this.algorand = algorand
+    if (cacheParamsTimeout !== undefined) this.cacheParamsTimeout = cacheParamsTimeout
     if (readerAccount) this.readerAccount = readerAccount
     this.factory = this.algorand.client.getTypedAppFactory(GhostofavmFactory, {
       defaultSender: this.readerAccount,
