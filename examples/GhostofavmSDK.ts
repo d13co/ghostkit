@@ -1232,6 +1232,7 @@ class GhostBase {
   protected client: GhostofavmClient
   public cacheParamsTimeout = 75 // ms
   public debug: boolean = false
+  private suggestedParamsPromise?: ReturnType<AlgorandClient['getSuggestedParams']>
 
   constructor({
     algorand,
@@ -1255,11 +1256,20 @@ class GhostBase {
   }
 
   protected async getAndCacheSuggestedParams() {
-    const suggestedParams = await this.algorand.getSuggestedParams()
-    if (this.cacheParamsTimeout) {
-      this.algorand.setSuggestedParamsCache(suggestedParams, new Date(Date.now() + this.cacheParamsTimeout))
+    // concurrent callers share the in-flight request instead of each hitting algod
+    if (this.suggestedParamsPromise) return this.suggestedParamsPromise
+    this.suggestedParamsPromise = (async () => {
+      const suggestedParams = await this.algorand.getSuggestedParams()
+      if (this.cacheParamsTimeout) {
+        this.algorand.setSuggestedParamsCache(suggestedParams, new Date(Date.now() + this.cacheParamsTimeout))
+      }
+      return suggestedParams
+    })()
+    try {
+      return await this.suggestedParamsPromise
+    } finally {
+      this.suggestedParamsPromise = undefined
     }
-    return suggestedParams
   }
 
   protected async execute<T>({
