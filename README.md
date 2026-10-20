@@ -264,7 +264,7 @@ const balances = await ghostSDK.acctBalanceData({
 - `arg`: the dynamic array argument to split.
 - `refsPerItem?`: unnamed resources each item makes the method touch (default 1; e.g. 2 for an account and its asset holding, 0 for none).
 - `maxPerTxn?`, `maxPerGroup?`: caps, e.g. to stay within the opcode budget.
-- `maxArgBytes?`: app arg bytes per app call. Defaults to 16,384 for a ghost that needs consensus v42 (AVM 13 or more than 3 extra pages), else 2,048.
+- `maxArgBytes?`: app arg bytes per app call, all arguments together. Defaults to 16,384 for a ghost that needs consensus v42 (AVM 13 or more than 3 extra pages), else 2,048. The chunked array is one app arg, so it also stays within 4,096 bytes, the limit for any one argument. Arrays of dynamic items are split by `maxPerTxn`, and the SDK throws if a call would go over either limit.
 
 A method's [chunk tag](#chunk-tag) sets its default `chunk`; `chunk: false` turns it off. Only split methods that log one result per item and treat items independently. For example, `acctBalanceData(accounts)` qualifies, and a method that sums its inputs doesn't.
 

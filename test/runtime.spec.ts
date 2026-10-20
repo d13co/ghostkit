@@ -251,7 +251,19 @@ describe('chunking', () => {
   test("uses v42's larger app args for a ghost that needs v42", async () => {
     const { sdk, calls } = sdkWith(GhostV13SDK, fakeBackend({ name: 'dt', limits: { ...GHOSTKIT_DT_DEFAULT_LIMITS, resourceLimitMultiplier: 1024 } }))
     await sdk.acctBalanceData({ methodArgsOrArgsArray: { accounts }, chunk: { arg: 'accounts' } })
-    expect(sizes(calls[0].groups)).toEqual([[300]])
+    // 511 addresses fit in 16,384 bytes of app args, but the array is one app arg of at most 4,096 bytes: 127 addresses
+    expect(sizes(calls[0].groups)).toEqual([[127, 127, 46]])
+  })
+
+  test('keeps the chunked array within 4,096 bytes on a stock node and with a larger maxArgBytes', async () => {
+    const v13 = sdkWith(GhostV13SDK)
+    await v13.sdk.acctBalanceData({ methodArgsOrArgsArray: { accounts }, chunk: { arg: 'accounts' } })
+    // 128 unnamed resources per group would allow 128 addresses in one app call: 4,098 bytes
+    expect(sizes(v13.calls[0].groups)).toEqual([[127, 1], [127, 1], [44]])
+
+    const v11 = sdkWith(GhostV11SDK, fakeBackend({ name: 'dt', limits: { ...GHOSTKIT_DT_DEFAULT_LIMITS, resourceLimitMultiplier: 1024 } }))
+    await v11.sdk.acctBalanceData({ methodArgsOrArgsArray: { accounts }, chunk: { arg: 'accounts', maxArgBytes: 16_384 } })
+    expect(sizes(v11.calls[0].groups)).toEqual([[127, 127, 46]])
   })
 
   test('honours refsPerItem, maxPerTxn and maxPerGroup', async () => {
@@ -260,6 +272,30 @@ describe('chunking', () => {
     await sdk.acctBalanceData({ methodArgsOrArgsArray: { accounts: accounts.slice(0, 100) }, chunk: { arg: 'accounts', maxPerTxn: 10, maxPerGroup: 30 } })
     expect(sizes(calls[0].groups)).toEqual([[63, 1], [36]])
     expect(sizes(calls[1].groups)).toEqual([[10, 10, 10], [10, 10, 10], [10, 10, 10], [10]])
+  })
+
+  test('sizes app calls next to other arguments, and checks arrays of dynamic items', async () => {
+    const { sdk } = sdkWith(GhostChunkSDK)
+    type ChunkFn = (signature: string, args: Record<string, unknown>, chunk: object, limits: object) => Record<string, unknown[]>[][]
+    const chunkOf = (signature: string, args: Record<string, unknown>, chunk: object) =>
+      (sdk as unknown as { _gkChunk: ChunkFn })._gkChunk(signature, args, chunk, GHOSTKIT_DT_DEFAULT_LIMITS)
+    const sizesOf = (groups: Record<string, unknown[]>[][], arg: string) => groups.map((g) => g.map((t) => t[arg].length))
+
+    // a 1,000-byte memo (1,002 encoded, with its length prefix) leaves 2,048 - 4 - 1,002 - 2 bytes: 32 addresses
+    const memoBalances = 'memoBalances(address[],byte[])uint64'
+    const groups = chunkOf(memoBalances, { accounts: accounts.slice(0, 40), memo: new Uint8Array(1_000) }, { arg: 'accounts' })
+    expect(sizesOf(groups, 'accounts')).toEqual([[32, 8]])
+    expect(() => chunkOf(memoBalances, { accounts, memo: new Uint8Array(2_100) }, { arg: 'accounts' })).toThrow(/leave no room for accounts/)
+
+    // 20-byte tags take 24 bytes each with their length and offset: 170 fit in 4,096 bytes, the per-arg limit
+    const tagLengths = 'tagLengths(string[],byte[])uint64'
+    const tags = Array.from({ length: 200 }, (_, i) => `${i}`.padStart(20, '0'))
+    const args = { tags, memo: new Uint8Array(0) }
+    const big = { arg: 'tags', refsPerItem: 0, maxPerTxn: 100, maxArgBytes: 16_384 }
+    expect(sizesOf(chunkOf(tagLengths, args, big), 'tags')).toEqual([[100, 100]])
+    expect(() => chunkOf(tagLengths, args, { ...big, maxPerTxn: 171 })).toThrow(/171 items of tags take 4106 bytes, more than the 4096 .*lower chunk.maxPerTxn/)
+    expect(() => chunkOf(tagLengths, { tags: ['x'.repeat(5_000)], memo: new Uint8Array(0) }, big)).toThrow(/an item of tags takes/)
+    await expect(sdk.tagLengths({ methodArgsOrArgsArray: args, chunk: { arg: 'tags', maxPerTxn: 100 } })).rejects.toThrow(/lower chunk.maxPerTxn/)
   })
 
   test("defaults to the method's @ghostkit-chunk tag, which chunk: false turns off", async () => {

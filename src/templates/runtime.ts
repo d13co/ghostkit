@@ -61,8 +61,9 @@ export type GhostkitChunkOptions = {
   /** At most this many items per group, e.g. to stay within the opcode budget. */
   maxPerGroup?: number
   /**
-   * The most app argument bytes per app call. Defaults to 16,384 for a ghost that needs consensus v42 (beyond 2,048
-   * bytes costs a small fee surcharge, which the fee budget covers), else 2,048.
+   * The most app argument bytes per app call, all arguments together. Defaults to 16,384 for a ghost that needs
+   * consensus v42 (beyond 2,048 bytes costs a small fee surcharge, which the fee budget covers), else 2,048. The chunked
+   * array is one argument, so it also stays within 4,096 bytes, the limit for any one argument.
    */
   maxArgBytes?: number
 }
@@ -282,6 +283,8 @@ const GK_PAST_PARAMS_MAX_AGE = 3_600_000
 const GK_FALLBACK_READER = 'A7NMWS3NT3IUDMLVO26ULGXGIIOUQ3ND2TXSER6EBGRZNOBOUIQXHIBGDE'
 /** Most transactions per group. */
 const GK_MAX_GROUP_SIZE = 16
+/** The most bytes in any one app argument, under any consensus version. */
+const GK_MAX_ARG_BYTES = 4_096
 /** Unnamed resources each app call may touch at 1x (consensus `MaxAppTotalTxnReferences`). */
 const GK_REFS_PER_TXN = 8
 /** The minimum balance an app's creator holds for it, and for each extra page (consensus `AppFlatParamsMinBalance`). */
@@ -950,19 +953,26 @@ export class GhostkitBase<TFactory, TClient> {
     if (!Array.isArray(items) || !arg.type.endsWith('[]')) throw new Error(`ghostkit: ${name}: ${chunk.arg} is not a dynamic array`)
     if (items.length === 0) return [[args]]
 
-    // app arg bytes: the selector, the other arguments, and the array's length prefix and items
+    // app arg bytes: the selector, the other arguments, and the array's length prefix and items. The array is one app
+    // arg, so it also stays within the per-arg limit.
     const elementType = gkAlgosdk.ABIType.from(arg.type.slice(0, -2))
+    const otherBytes = method.args
+      .filter((a) => a !== arg)
+      .reduce((n, a) => {
+        if (gkAlgosdk.abiTypeIsReference(a.type)) return n + 1
+        if (gkAlgosdk.abiTypeIsTransaction(a.type)) throw new Error(`ghostkit: ${name}: can't chunk a method with transaction arguments`)
+        // algokit's encoder returns a Uint8Array as is, so for an ABI type such as byte[] encode it with algosdk, which
+        // adds the length prefix the app call will carry
+        const value = args[a.name!] as never
+        const asIs = a.struct || a.type.startsWith('AVM') || !((value as unknown) instanceof Uint8Array)
+        return n + (asIs ? gkEncodeValue(value, a.struct ?? a.type, this.appSpec.structs) : gkAlgosdk.ABIType.from(a.type).encode(value)).length
+      }, 4)
+    const maxArgBytes = chunk.maxArgBytes ?? (this._gkNeedsV42() ? 16_384 : 2_048)
+    const maxArrayBytes = Math.min(maxArgBytes - otherBytes, GK_MAX_ARG_BYTES)
+    if (maxArrayBytes < 2) throw new Error(`ghostkit: ${name}: the other arguments leave no room for ${chunk.arg} in an app call`)
     let perTxn = chunk.maxPerTxn ?? Infinity
     if (!elementType.isDynamic()) {
-      const otherBytes = method.args
-        .filter((a) => a !== arg)
-        .reduce((n, a) => {
-          if (gkAlgosdk.abiTypeIsReference(a.type)) return n + 1
-          if (gkAlgosdk.abiTypeIsTransaction(a.type)) throw new Error(`ghostkit: ${name}: can't chunk a method with transaction arguments`)
-          return n + gkEncodeValue(args[a.name!] as never, a.struct ?? a.type, this.appSpec.structs).length
-        }, 4)
-      const maxArgBytes = chunk.maxArgBytes ?? (this._gkNeedsV42() ? 16_384 : 2_048)
-      perTxn = Math.min(perTxn, Math.floor((maxArgBytes - otherBytes - 2) / elementType.byteLen()))
+      perTxn = Math.min(perTxn, Math.floor((maxArrayBytes - 2) / elementType.byteLen()))
     } else if (chunk.maxPerTxn === undefined) {
       throw new Error(`ghostkit: ${name}: set chunk.maxPerTxn, since the items of ${chunk.arg} vary in size`)
     }
@@ -979,6 +989,19 @@ export class GhostkitBase<TFactory, TClient> {
       const txns: Record<string, unknown>[] = []
       for (let t = 0; t < groupItems.length; t += perTxn) txns.push({ ...args, [chunk.arg]: groupItems.slice(t, t + perTxn) })
       groups.push(txns)
+    }
+    // items of varying size are split by maxPerTxn alone, so check each app call's bytes here
+    if (elementType.isDynamic()) {
+      for (const txn of groups.flat()) {
+        const chunkItems = txn[chunk.arg] as unknown[]
+        const bytes = gkAlgosdk.ABIType.from(arg.type).encode(chunkItems as never).length
+        if (bytes <= maxArrayBytes) continue
+        throw new Error(
+          chunkItems.length === 1
+            ? `ghostkit: ${name}: an item of ${chunk.arg} takes ${bytes} bytes, more than the ${maxArrayBytes} that fit in an app call`
+            : `ghostkit: ${name}: ${chunkItems.length} items of ${chunk.arg} take ${bytes} bytes, more than the ${maxArrayBytes} that fit in an app call; lower chunk.maxPerTxn`,
+        )
+      }
     }
     return groups
   }

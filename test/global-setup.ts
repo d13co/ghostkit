@@ -23,6 +23,16 @@ function padded(spec: Spec, size: number, name = spec.name): Spec {
   return { ...spec, name, byteCode: { ...spec.byteCode, approval: toB64(Uint8Array.from(program)) } }
 }
 
+const readonlyMethod = (name: string, args: { type: string; name: string }[]) => ({
+  name,
+  args,
+  returns: { type: 'uint64' },
+  actions: { create: ['NoOp'], call: ['NoOp'] },
+  readonly: true,
+  events: [],
+  recommendations: {},
+})
+
 export default async function setup() {
   const dir = join(process.cwd(), 'test/generated')
   mkdirSync(dir, { recursive: true })
@@ -37,9 +47,14 @@ export default async function setup() {
     {
       ...example,
       name: 'GhostChunk',
-      methods: example.methods.map((m) =>
-        m.name === 'acctBalanceData' ? { ...m, desc: 'Balance data of each account.\n@ghostkit-chunk accounts' } : m,
-      ),
+      methods: [
+        ...example.methods.map((m) =>
+          m.name === 'acctBalanceData' ? { ...m, desc: 'Balance data of each account.\n@ghostkit-chunk accounts' } : m,
+        ),
+        // not in the program: for chunking arrays next to other arguments, which fails or is sized before any simulate
+        readonlyMethod('tagLengths', [{ type: 'string[]', name: 'tags' }, { type: 'byte[]', name: 'memo' }]),
+        readonlyMethod('memoBalances', [{ type: 'address[]', name: 'accounts' }, { type: 'byte[]', name: 'memo' }]),
+      ],
     },
   ]
   for (const spec of specs) {

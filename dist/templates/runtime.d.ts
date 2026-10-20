@@ -39,8 +39,9 @@ export type GhostkitChunkOptions = {
     /** At most this many items per group, e.g. to stay within the opcode budget. */
     maxPerGroup?: number;
     /**
-     * The most app argument bytes per app call. Defaults to 16,384 for a ghost that needs consensus v42 (beyond 2,048
-     * bytes costs a small fee surcharge, which the fee budget covers), else 2,048.
+     * The most app argument bytes per app call, all arguments together. Defaults to 16,384 for a ghost that needs
+     * consensus v42 (beyond 2,048 bytes costs a small fee surcharge, which the fee budget covers), else 2,048. The chunked
+     * array is one argument, so it also stays within 4,096 bytes, the limit for any one argument.
      */
     maxArgBytes?: number;
 };
