@@ -59,6 +59,10 @@ describe('@ghostkit-chunk', () => {
     const blk = { ...example.methods.find((m) => m.name === 'blkData')!, desc: '@ghostkit-chunk firstRound' }
     expect(() => parseChunkTag(blk)).toThrow(/not a dynamic array/)
   })
+
+  test('reads the tag in backticks, the form puya-ts keeps in a description', () => {
+    expect(parseChunkTag(method('Balances. `@ghostkit-chunk accounts maxPerGroup=100`'))).toEqual({ arg: 'accounts', maxPerGroup: 100 })
+  })
 })
 
 describe('buildGhostSDK', () => {
@@ -71,6 +75,14 @@ describe('buildGhostSDK', () => {
     expect(source).toContain(`chunk: {"arg":"accounts"}`)
     expect(source).toMatch(/\/\*\*\n {3}\* Balance data\.\n {3}\*\/\n {2}acctBalanceData\(/)
     expect(source).toContain('export const GHOST_META: GhostkitMeta = {"avmVersion":11,"extraProgramPages":0')
+
+    const ticked = await build({
+      ...example,
+      name: 'Ticked',
+      methods: example.methods.map((m) => (m.name === 'acctBalanceData' ? { ...m, desc: 'Balance data. `@ghostkit-chunk accounts refsPerItem=2`' } : m)),
+    })
+    expect(ticked).toContain(`chunk: {"arg":"accounts","refsPerItem":2}`)
+    expect(ticked).toMatch(/\/\*\*\n {3}\* Balance data\.\n {3}\*\/\n {2}acctBalanceData\(/)
   })
 
   test('rejects methods named like SDK members', async () => {

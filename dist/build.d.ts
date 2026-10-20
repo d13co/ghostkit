@@ -7,7 +7,7 @@ export declare function readProgramVersion(program: Uint8Array): number;
 export declare function getGhostMeta(appSpec: Arc56Contract, warn?: (message: string) => void): GhostkitMeta;
 /**
  * Reads a method's default chunking from its description: `@ghostkit-chunk <arg> [refsPerItem=N] [maxPerTxn=N]
- * [maxPerGroup=N] [maxArgBytes=N]`.
+ * [maxPerGroup=N] [maxArgBytes=N]`, written as is or in backticks.
  */
 export declare function parseChunkTag(method: Arc56Contract["methods"][number]): GhostkitChunkOptions | undefined;
 export declare function buildGhostSDK(appSpecPath: string, { warn }?: {

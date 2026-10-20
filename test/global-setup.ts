@@ -23,10 +23,10 @@ function padded(spec: Spec, size: number, name = spec.name): Spec {
   return { ...spec, name, byteCode: { ...spec.byteCode, approval: toB64(Uint8Array.from(program)) } }
 }
 
-const readonlyMethod = (name: string, args: { type: string; name: string }[]) => ({
+const readonlyMethod = (name: string, args: { type: string; name: string }[], returns = 'uint64') => ({
   name,
   args,
-  returns: { type: 'uint64' },
+  returns: { type: returns },
   actions: { create: ['NoOp'], call: ['NoOp'] },
   readonly: true,
   events: [],
@@ -54,6 +54,8 @@ export default async function setup() {
         // not in the program: for chunking arrays next to other arguments, which fails or is sized before any simulate
         readonlyMethod('tagLengths', [{ type: 'string[]', name: 'tags' }, { type: 'byte[]', name: 'memo' }]),
         readonlyMethod('memoBalances', [{ type: 'address[]', name: 'accounts' }, { type: 'byte[]', name: 'memo' }]),
+        // not in the program either: a dynamic return type, for decoding
+        readonlyMethod('accountNotes', [{ type: 'address[]', name: 'accounts' }], '(address,string)'),
       ],
     },
   ]

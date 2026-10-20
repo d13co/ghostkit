@@ -1273,8 +1273,8 @@ export type GhostkitChunkOptions = {
   maxPerGroup?: number
   /**
    * The most app argument bytes per app call, all arguments together. Defaults to 16,384 for a ghost that needs
-   * consensus v42 (beyond 2,048 bytes costs a small fee surcharge, which the fee budget covers), else 2,048. The chunked
-   * array is one argument, so it also stays within 4,096 bytes, the limit for any one argument.
+   * consensus v42, else 4,096 (beyond 2,048 bytes costs a small fee surcharge, which the fee budget covers; set 2,048
+   * to avoid it). The chunked array is one argument, so it also stays within 4,096 bytes, the limit for any one argument.
    */
   maxArgBytes?: number
 }
@@ -1699,7 +1699,8 @@ function gkDecodeLogs<T>(logs: Uint8Array[][], returnType: string, structs: GkAr
     if (!last || last.length < 4 || GK_RETURN_PREFIX.some((b, j) => last[j] !== b)) {
       throw new Error(`transaction ${i} has no ABI return log; ghostkit methods must be ABI methods that return a value`)
     }
-    return txnLogs.slice(0, -1).map((log) => gkDecodeValue(log, returnType, structs) as T)
+    // decode a copy: logs can be views into one response buffer, and algosdk's ABI decoder ignores a view's byteOffset
+    return txnLogs.slice(0, -1).map((log) => gkDecodeValue(log.slice(), returnType, structs) as T)
   })
 }
 
@@ -2178,7 +2179,7 @@ export class GhostkitBase<TFactory, TClient> {
         const asIs = a.struct || a.type.startsWith('AVM') || !((value as unknown) instanceof Uint8Array)
         return n + (asIs ? gkEncodeValue(value, a.struct ?? a.type, this.appSpec.structs) : gkAlgosdk.ABIType.from(a.type).encode(value)).length
       }, 4)
-    const maxArgBytes = chunk.maxArgBytes ?? (this._gkNeedsV42() ? 16_384 : 2_048)
+    const maxArgBytes = chunk.maxArgBytes ?? (this._gkNeedsV42() ? 16_384 : 4_096)
     const maxArrayBytes = Math.min(maxArgBytes - otherBytes, GK_MAX_ARG_BYTES)
     if (maxArrayBytes < 2) throw new Error(`ghostkit: ${name}: the other arguments leave no room for ${chunk.arg} in an app call`)
     let perTxn = chunk.maxPerTxn ?? Infinity

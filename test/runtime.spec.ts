@@ -1,6 +1,7 @@
 import { createServer, type Server } from 'http'
 import type { AddressInfo } from 'net'
 import { AlgorandClient } from '@algorandfoundation/algokit-utils'
+import algosdk from 'algosdk'
 import { afterAll, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest'
 import { GhostBigSDK } from './generated/GhostBigSDK'
 import { GhostChunkSDK } from './generated/GhostChunkSDK'
@@ -9,6 +10,8 @@ import {
   GHOST_META,
   GHOSTKIT_DT_DEFAULT_LIMITS,
   GHOSTKIT_RESERVED_MEMBERS,
+  GHOSTKIT_STOCK_LIMITS,
+  type GhostkitBackend,
   GhostkitError,
   GhostV11SDK,
   ghostkitDetectNode,
@@ -238,14 +241,18 @@ describe('chunking', () => {
     const { sdk, calls } = sdkWith(GhostV11SDK)
     const data = await sdk.acctBalanceData({ methodArgsOrArgsArray: { accounts }, chunk: { arg: 'accounts' } })
     expect(data.map((d) => d.address)).toEqual(accounts)
-    // 63 addresses fit in 2,048 bytes of app args; 128 unnamed resources per group at 1x
-    expect(sizes(calls[0].groups)).toEqual([[63, 63, 2], [63, 63, 2], [44]])
+    // 127 addresses fit in 4,096 bytes of app args; 128 unnamed resources per group at 1x
+    expect(sizes(calls[0].groups)).toEqual([[127, 1], [127, 1], [44]])
   })
 
   test('uses the resource multiplier of a dtalgorand node', async () => {
     const { sdk, calls } = sdkWith(GhostV11SDK, fakeBackend({ name: 'dt', limits: { ...GHOSTKIT_DT_DEFAULT_LIMITS, resourceLimitMultiplier: 1024 } }))
     await sdk.acctBalanceData({ methodArgsOrArgsArray: { accounts }, chunk: { arg: 'accounts' } })
-    expect(sizes(calls[0].groups)).toEqual([[63, 63, 63, 63, 48]])
+    expect(sizes(calls[0].groups)).toEqual([[127, 127, 46]])
+
+    // capped at 2,048 bytes, to avoid the fee surcharge beyond it
+    await sdk.acctBalanceData({ methodArgsOrArgsArray: { accounts }, chunk: { arg: 'accounts', maxArgBytes: 2_048 } })
+    expect(sizes(calls[1].groups)).toEqual([[63, 63, 63, 63, 48]])
   })
 
   test("uses v42's larger app args for a ghost that needs v42", async () => {
@@ -270,7 +277,7 @@ describe('chunking', () => {
     const { sdk, calls } = sdkWith(GhostV11SDK)
     await sdk.acctBalanceData({ methodArgsOrArgsArray: { accounts: accounts.slice(0, 100) }, chunk: { arg: 'accounts', refsPerItem: 2 } })
     await sdk.acctBalanceData({ methodArgsOrArgsArray: { accounts: accounts.slice(0, 100) }, chunk: { arg: 'accounts', maxPerTxn: 10, maxPerGroup: 30 } })
-    expect(sizes(calls[0].groups)).toEqual([[63, 1], [36]])
+    expect(sizes(calls[0].groups)).toEqual([[64], [36]])
     expect(sizes(calls[1].groups)).toEqual([[10, 10, 10], [10, 10, 10], [10, 10, 10], [10]])
   })
 
@@ -281,11 +288,11 @@ describe('chunking', () => {
       (sdk as unknown as { _gkChunk: ChunkFn })._gkChunk(signature, args, chunk, GHOSTKIT_DT_DEFAULT_LIMITS)
     const sizesOf = (groups: Record<string, unknown[]>[][], arg: string) => groups.map((g) => g.map((t) => t[arg].length))
 
-    // a 1,000-byte memo (1,002 encoded, with its length prefix) leaves 2,048 - 4 - 1,002 - 2 bytes: 32 addresses
+    // a 3,000-byte memo (3,002 encoded, with its length prefix) leaves 4,096 - 4 - 3,002 - 2 bytes: 34 addresses
     const memoBalances = 'memoBalances(address[],byte[])uint64'
-    const groups = chunkOf(memoBalances, { accounts: accounts.slice(0, 40), memo: new Uint8Array(1_000) }, { arg: 'accounts' })
-    expect(sizesOf(groups, 'accounts')).toEqual([[32, 8]])
-    expect(() => chunkOf(memoBalances, { accounts, memo: new Uint8Array(2_100) }, { arg: 'accounts' })).toThrow(/leave no room for accounts/)
+    const groups = chunkOf(memoBalances, { accounts: accounts.slice(0, 40), memo: new Uint8Array(3_000) }, { arg: 'accounts' })
+    expect(sizesOf(groups, 'accounts')).toEqual([[34, 6]])
+    expect(() => chunkOf(memoBalances, { accounts, memo: new Uint8Array(4_100) }, { arg: 'accounts' })).toThrow(/leave no room for accounts/)
 
     // 20-byte tags take 24 bytes each with their length and offset: 170 fit in 4,096 bytes, the per-arg limit
     const tagLengths = 'tagLengths(string[],byte[])uint64'
@@ -295,7 +302,7 @@ describe('chunking', () => {
     expect(sizesOf(chunkOf(tagLengths, args, big), 'tags')).toEqual([[100, 100]])
     expect(() => chunkOf(tagLengths, args, { ...big, maxPerTxn: 171 })).toThrow(/171 items of tags take 4106 bytes, more than the 4096 .*lower chunk.maxPerTxn/)
     expect(() => chunkOf(tagLengths, { tags: ['x'.repeat(5_000)], memo: new Uint8Array(0) }, big)).toThrow(/an item of tags takes/)
-    await expect(sdk.tagLengths({ methodArgsOrArgsArray: args, chunk: { arg: 'tags', maxPerTxn: 100 } })).rejects.toThrow(/lower chunk.maxPerTxn/)
+    await expect(sdk.tagLengths({ methodArgsOrArgsArray: args, chunk: { arg: 'tags', maxPerTxn: 171, refsPerItem: 0 } })).rejects.toThrow(/lower chunk.maxPerTxn/)
   })
 
   test("defaults to the method's @ghostkit-chunk tag, which chunk: false turns off", async () => {
@@ -325,6 +332,44 @@ describe('chunking', () => {
     expect(ts).toHaveLength(1)
     expect(data.map((d) => d.address)).toEqual(accounts)
     expect(calls[0].groups).toHaveLength(4)
+  })
+})
+
+describe('decoding', () => {
+  test('decodes logs that are views into one response buffer', async () => {
+    // a dtalgorand simulate response's logs share one buffer; algosdk's ABI decoder ignores a view's byteOffset
+    const note = algosdk.ABIType.from('(address,string)')
+    const addresses = algosdk.ABIType.from('address[]')
+    const backend: GhostkitBackend = {
+      name: 'stock',
+      limits: GHOSTKIT_STOCK_LIMITS,
+      simulate: (groups) =>
+        Promise.all(
+          groups.map(async (group) => {
+            const { transactions } = await (await group()).buildTransactions()
+            const logs = transactions.map((t) => {
+              const accounts = addresses.decode(t.applicationCall!.appArgs[1]) as string[]
+              const encoded = [
+                ...accounts.map((a, i) => note.encode([a, `note ${i}`])),
+                Uint8Array.from([0x15, 0x1f, 0x7c, 0x75, ...note.encode([accounts[0], ''])]),
+              ]
+              const buffer = new Uint8Array(3 + encoded.reduce((n, e) => n + e.length, 0)).fill(0xff)
+              let offset = 3
+              return encoded.map((e) => {
+                buffer.set(e, offset)
+                offset += e.length
+                return buffer.subarray(offset - e.length, offset)
+              })
+            })
+            return { ok: true as const, logs }
+          }),
+        ),
+      simulateRounds: () => Promise.reject(new Error('not used')),
+    }
+    const { sdk } = sdkWith(GhostChunkSDK, { backend, calls: [] })
+    const accounts = randomAddresses(3)
+    const notes = await sdk.accountNotes({ methodArgsOrArgsArray: { accounts } })
+    expect(notes).toEqual(accounts.map((a, i) => [a, `note ${i}`]))
   })
 })
 

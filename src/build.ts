@@ -58,12 +58,13 @@ export function getGhostMeta(appSpec: Arc56Contract, warn: (message: string) => 
   return { avmVersion, extraProgramPages, approvalBytes: approval.length, clearBytes: clear.length };
 }
 
-const CHUNK_TAG = /@ghostkit-chunk\s+([A-Za-z_$][\w$]*)((?:\s+\w+=\d+)*)/;
+// optionally in backticks: puya-ts drops JSDoc tags from a method's description, but keeps inline code
+const CHUNK_TAG = /`?@ghostkit-chunk\s+([A-Za-z_$][\w$]*)((?:\s+\w+=\d+)*)`?/;
 const CHUNK_KEYS = ["refsPerItem", "maxPerTxn", "maxPerGroup", "maxArgBytes"] as const;
 
 /**
  * Reads a method's default chunking from its description: `@ghostkit-chunk <arg> [refsPerItem=N] [maxPerTxn=N]
- * [maxPerGroup=N] [maxArgBytes=N]`.
+ * [maxPerGroup=N] [maxArgBytes=N]`, written as is or in backticks.
  */
 export function parseChunkTag(method: Arc56Contract["methods"][number]): GhostkitChunkOptions | undefined {
   const match = method.desc?.match(CHUNK_TAG);

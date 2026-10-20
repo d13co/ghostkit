@@ -38,7 +38,7 @@
   },
   "dependencies": {
     "@algorandfoundation/algokit-utils": "file:vendor/algorandfoundation-algokit-utils-9.2.3-dt.1.tgz",
-    "algosdk": "file:vendor/algosdk-3.8.0-dt.1.tgz",
+    "algosdk": "file:vendor/algosdk-3.8.0-dt.2.tgz",
     "change-case": "^5.4.4"
   }
 }

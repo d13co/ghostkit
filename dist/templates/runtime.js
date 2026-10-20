@@ -298,7 +298,8 @@ function gkDecodeLogs(logs, returnType, structs) {
         if (!last || last.length < 4 || GK_RETURN_PREFIX.some((b, j) => last[j] !== b)) {
             throw new Error(`transaction ${i} has no ABI return log; ghostkit methods must be ABI methods that return a value`);
         }
-        return txnLogs.slice(0, -1).map((log) => (0, app_arc56_1.getABIDecodedValue)(log, returnType, structs));
+        // decode a copy: logs can be views into one response buffer, and algosdk's ABI decoder ignores a view's byteOffset
+        return txnLogs.slice(0, -1).map((log) => (0, app_arc56_1.getABIDecodedValue)(log.slice(), returnType, structs));
     });
 }
 // Every generated SDK inlines its own copy of this runtime, so the caches live on a global registry for SDKs of
@@ -694,7 +695,7 @@ class GhostkitBase {
             const asIs = a.struct || a.type.startsWith('AVM') || !(value instanceof Uint8Array);
             return n + (asIs ? (0, app_arc56_1.getABIEncodedValue)(value, a.struct ?? a.type, this.appSpec.structs) : gkAlgosdk.ABIType.from(a.type).encode(value)).length;
         }, 4);
-        const maxArgBytes = chunk.maxArgBytes ?? (this._gkNeedsV42() ? 16384 : 2048);
+        const maxArgBytes = chunk.maxArgBytes ?? (this._gkNeedsV42() ? 16384 : 4096);
         const maxArrayBytes = Math.min(maxArgBytes - otherBytes, GK_MAX_ARG_BYTES);
         if (maxArrayBytes < 2)
             throw new Error(`ghostkit: ${name}: the other arguments leave no room for ${chunk.arg} in an app call`);

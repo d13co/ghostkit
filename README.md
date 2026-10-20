@@ -115,6 +115,8 @@ public acctBalanceData(accounts: Account[]): AcctBalanceData { ... }
 
 The tag takes optional `refsPerItem=N` (unnamed resources each item touches, default 1), `maxPerTxn=N`, `maxPerGroup=N` and `maxArgBytes=N`, e.g. `@ghostkit-chunk holdings refsPerItem=2`. Arrays of dynamic items (e.g. `string[]`) need `maxPerTxn`.
 
+Puya-ts leaves JSDoc tags out of a method's description in the ARC-56 spec, so with puya-ts write the tag in backticks, which it keeps: ``Balance data of each account. `@ghostkit-chunk accounts` ``. Ghostkit reads it either way and leaves it out of the generated doc comment.
+
 ## Ghostkit
 
 Ghostkit is an "SDK generator" that builds on top of the algokit generated client for the ghost contracts.
@@ -247,7 +249,7 @@ The reader also creates the ghost app in each simulate, so its minimum balance g
 
 A single app call is limited in how much it can take and touch:
 
-- **App args.** 2 KB per app call, or 16 KB on consensus v42 (AVM 13) networks, beyond 2 KB for a fee surcharge. A 2 KB `address[]` holds 63 addresses (`63 × 32 = 2016`, plus the method selector and length).
+- **App args.** At most 4,096 bytes per app arg, and 16 KB per app call, beyond 2 KB for a fee surcharge (consensus v42, which live networks run and dtalgorand backports to past rounds). A 4 KB `address[]` holds 127 addresses (`127 × 32 = 4064`, plus its length).
 - **Unnamed resources.** A group can touch 128 accounts, assets, apps and boxes it doesn't list (8 per app call, 16 app calls). A dtalgorand node can multiply this by up to 1024 (`resource-limit-multiplier`).
 
 Pass `chunk` to have the SDK split an array argument across app calls, and groups if needed, sized to these limits and the node's. The results come back as one array, in input order:
@@ -264,11 +266,11 @@ const balances = await ghostSDK.acctBalanceData({
 - `arg`: the dynamic array argument to split.
 - `refsPerItem?`: unnamed resources each item makes the method touch (default 1; e.g. 2 for an account and its asset holding, 0 for none).
 - `maxPerTxn?`, `maxPerGroup?`: caps, e.g. to stay within the opcode budget.
-- `maxArgBytes?`: app arg bytes per app call, all arguments together. Defaults to 16,384 for a ghost that needs consensus v42 (AVM 13 or more than 3 extra pages), else 2,048. The chunked array is one app arg, so it also stays within 4,096 bytes, the limit for any one argument. Arrays of dynamic items are split by `maxPerTxn`, and the SDK throws if a call would go over either limit.
+- `maxArgBytes?`: app arg bytes per app call, all arguments together. Defaults to 16,384 for a ghost that needs consensus v42 (AVM 13 or more than 3 extra pages), else 4,096; set 2,048 to avoid the fee surcharge on app args over 2 KB. The chunked array is one app arg, so it also stays within 4,096 bytes, the limit for any one argument. Arrays of dynamic items are split by `maxPerTxn`, and the SDK throws if a call would go over either limit.
 
 A method's [chunk tag](#chunk-tag) sets its default `chunk`; `chunk: false` turns it off. Only split methods that log one result per item and treat items independently. For example, `acctBalanceData(accounts)` qualifies, and a method that sums its inputs doesn't.
 
-On a stock node, 300 addresses become 3 groups (`63 + 63 + 2`, `63 + 63 + 2`, `44`), simulated concurrently. On a dtalgorand node with a 1024× multiplier they fit in one group of 5 app calls, and an AVM 13 ghost fits them in one app call.
+On a stock node, 300 addresses become 3 groups (`127 + 1`, `127 + 1`, `44`: 128 unnamed resources per group), simulated concurrently. On a dtalgorand node with a 1024× multiplier they fit in one group of 3 app calls (`127 + 127 + 46`).
 
 You can still split inputs yourself by passing a list to `methodArgsOrArgsArray`: each entry becomes an app call in one group.
 

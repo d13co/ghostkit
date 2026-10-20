@@ -55,11 +55,12 @@ function getGhostMeta(appSpec, warn = () => { }) {
     }
     return { avmVersion, extraProgramPages, approvalBytes: approval.length, clearBytes: clear.length };
 }
-const CHUNK_TAG = /@ghostkit-chunk\s+([A-Za-z_$][\w$]*)((?:\s+\w+=\d+)*)/;
+// optionally in backticks: puya-ts drops JSDoc tags from a method's description, but keeps inline code
+const CHUNK_TAG = /`?@ghostkit-chunk\s+([A-Za-z_$][\w$]*)((?:\s+\w+=\d+)*)`?/;
 const CHUNK_KEYS = ["refsPerItem", "maxPerTxn", "maxPerGroup", "maxArgBytes"];
 /**
  * Reads a method's default chunking from its description: `@ghostkit-chunk <arg> [refsPerItem=N] [maxPerTxn=N]
- * [maxPerGroup=N] [maxArgBytes=N]`.
+ * [maxPerGroup=N] [maxArgBytes=N]`, written as is or in backticks.
  */
 function parseChunkTag(method) {
     const match = method.desc?.match(CHUNK_TAG);
