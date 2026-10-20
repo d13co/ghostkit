@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.example.json",
+  "compilerOptions": {
+    "paths": {
+      "@algorandfoundation/algokit-utils": ["./node_modules/algokit-utils-stock"],
+      "@algorandfoundation/algokit-utils/*": ["./node_modules/algokit-utils-stock/*"]
+    }
+  },
+  "include": ["examples/*.ts"],
+  "exclude": ["examples/*.algo.ts"]
+}
