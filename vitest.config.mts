@@ -14,7 +14,12 @@ export default defineConfig({
     globalSetup: ['test/global-setup.ts'],
     projects: [
       { extends: true, test: { name: 'unit', include: ['test/**/*.spec.ts'] } },
-      { extends: true, resolve: { alias: stockUtils }, test: { name: 'unit-stock-utils', include: ['test/**/*.spec.ts'] } },
+      // build.spec.ts doesn't use algokit-utils, and two projects writing its output at once race: run it once
+      {
+        extends: true,
+        resolve: { alias: stockUtils },
+        test: { name: 'unit-stock-utils', include: ['test/**/*.spec.ts'], exclude: ['test/build.spec.ts', '**/node_modules/**'] },
+      },
       // against live nodes: LocalNet (ALGOD_SERVER, a stock algod) and a MainNet dtalgorand node (DT_ALGOD_SERVER)
       { extends: true, test: { name: 'live', include: ['test/**/*.live.ts'], testTimeout: 120_000, hookTimeout: 60_000 } },
       {

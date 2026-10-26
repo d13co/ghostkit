@@ -229,7 +229,7 @@ Inside `batch` and `atRounds`, pass simulate options to them (`batch(fn, options
 
 Every generated method takes an optional `extraMethodCallArgs`, a pass-through to algokit's `CommonAppCallParams` (with `appId`/`sender`/`method`/`args`/`onComplete` omitted — the SDK fills those in). So you can set `staticFee`, `extraFee`, `firstValidRound`, `lastValidRound`, `note`, lease, etc. on the underlying app call.
 
-A query sends each app call as the block after the round makes it, so calls that set `firstValidRound`, `lastValidRound`, `note`, `lease`, `rekeyTo`, `accessReferences` or `rejectVersion` are simulated instead (see [Simulate options](#simulate-options)).
+A query sends each app call as the block after the round makes it, so calls that set `firstValidRound`, `lastValidRound`, `validityWindow`, `note`, `lease`, `rekeyTo`, `accessReferences` or `rejectVersion` are simulated instead (see [Simulate options](#simulate-options)).
 
 **Per-call form.** `extraMethodCallArgs` may be a single object (applied to every app call) or an **array aligned 1:1** with the array form of `methodArgsOrArgsArray` — the SDK uses `extraMethodCallArgs[i]` for the i-th app call. Use this to give each app call its own fee or validity window.
 

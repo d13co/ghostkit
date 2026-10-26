@@ -1974,6 +1974,8 @@ export function ghostkitQueryBackend(
       ),
     )
     return rounds.map((requested, r) => {
+      // With several targets (not in normal ghostkit use: one program or app, one reader), each `run` pins the latest
+      // round on its own, and the round reported is the first target's
       const round = results[0][r].round
       const outcomes = placement.map((txns, g): GhostkitGroupOutcome => {
         const override = results[txns[0]?.target ?? 0][r].protocolOverride
@@ -2499,7 +2501,9 @@ export class GhostkitBase<TFactory, TClient> {
 
     // a query sends each app call alone, as the block after the round makes it: fields it can't set go to simulate
     const abiArgs = this._gkMethod(spec.signature).args
-    const unqueryableField = (['firstValidRound', 'lastValidRound', 'note', 'lease', 'rekeyTo', 'accessReferences', 'rejectVersion'] as const).find(
+    const unqueryableField = (
+      ['firstValidRound', 'lastValidRound', 'validityWindow', 'note', 'lease', 'rekeyTo', 'accessReferences', 'rejectVersion'] as const
+    ).find(
       (field) => groupEntries.some((entries) => entries.some(({ extra }) => (extra as Record<string, unknown>)[field] !== undefined)),
     )
     const simulateOnly = abiArgs.some((a) => gkAlgosdk.abiTypeIsTransaction(a.type))
@@ -2679,8 +2683,9 @@ export class GhostkitBase<TFactory, TClient> {
     }
     if (gkStatus(e) === 400) {
       const message = gkErrorText(e)
-      // the node won't query this program (e.g. too large for its query limits): remember it, for this SDK instance
-      if (/\bprogram\b/.test(message) && !/after the latest round/.test(message)) this._gkShared.unqueryable.set(this._gkQueryKey(), message)
+      // the node won't query a program this large (older dtalgod checked the pre-v42 size limit): remember it, for this
+      // SDK instance
+      if (/bytes, more than the \d+ an app may have/.test(message)) this._gkShared.unqueryable.set(this._gkQueryKey(), message)
       this._gkWarn('query-400', `the node rejected a query (${message}); simulating instead`)
       return { message: `the node rejected the query: ${message}` }
     }
