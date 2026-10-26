@@ -1,6 +1,6 @@
 {
   "name": "ghostkit",
-  "version": "0.1.0-dt.1",
+  "version": "0.1.0-dt.2",
   "description": "Generate typed SDKs for ghost contracts: Algorand contracts that are simulated, never deployed",
   "files": [
     "dist/"
