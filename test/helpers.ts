@@ -1,8 +1,10 @@
 // Offline test helpers: an AlgorandClient that never needs a node, and a backend that runs the example ghost in JS.
 import { AlgorandClient } from '@algorandfoundation/algokit-utils'
 import algosdk from 'algosdk'
+import { vi } from 'vitest'
 import type { GhostkitBackend, GhostkitGroup, GhostkitGroupOutcome, GhostkitSimulateLimits } from './generated/GhostV11SDK'
-import { APP_SPEC, GHOSTKIT_STOCK_LIMITS } from './generated/GhostV11SDK'
+import { APP_SPEC as CHUNK_APP_SPEC } from './generated/GhostChunkSDK'
+import { GHOSTKIT_STOCK_LIMITS } from './generated/GhostV11SDK'
 
 export const READER = 'A7NMWS3NT3IUDMLVO26ULGXGIIOUQ3ND2TXSER6EBGRZNOBOUIQXHIBGDE'
 export const LAST_ROUND = 1_000n
@@ -25,15 +27,22 @@ export function offlineAlgorand(port = 9, { genesisHash = new Uint8Array(32) }: 
   return algorand
 }
 
-const methods = APP_SPEC.methods.map((m) => new algosdk.ABIMethod(m))
+// the example's methods, and GhostChunk's extra ones
+const methods = CHUNK_APP_SPEC.methods.map((m) => new algosdk.ABIMethod(m))
 const RETURN_PREFIX = Uint8Array.from([0x15, 0x1f, 0x7c, 0x75])
 const concat = (...parts: Uint8Array[]) => Uint8Array.from(parts.flatMap((p) => Array.from(p)))
 
 /** What the example ghost logs for a transaction, computed in JS: balance = 1 + index in the call, minBalance = 100,000. */
 export function runExampleGhost(txn: algosdk.Transaction, round: bigint): Uint8Array[] {
-  const [selector, ...args] = txn.applicationCall!.appArgs
+  return runExampleGhostArgs(txn.applicationCall!.appArgs, round)
+}
+
+/** What the example ghost logs for an app call with these app args (see `runExampleGhost`). */
+export function runExampleGhostArgs(appArgs: readonly Uint8Array[], round: bigint): Uint8Array[] {
+  const [selector, ...args] = appArgs
   const method = methods.find((m) => m.getSelector().every((b, i) => b === selector[i]))!
-  const decoded = method.args.map((a, i) => (a.type as algosdk.ABIType).decode(args[i]))
+  // reference arguments (account, asset, application) are indexes, left undecoded
+  const decoded = method.args.map((a, i) => (typeof a.type === 'string' ? args[i] : a.type.decode(args[i])))
   const returnType = method.returns.type as algosdk.ABIType
   const logs: Uint8Array[] = []
   switch (method.name) {
@@ -43,6 +52,9 @@ export function runExampleGhost(txn: algosdk.Transaction, round: bigint): Uint8A
     case 'blkTimestamp':
     case 'blkTxnCounter':
       for (let r = decoded[0] as bigint; r <= (decoded[1] as bigint); r++) logs.push(returnType.encode(r * 10n + round))
+      break
+    case 'accountBalance':
+      logs.push(returnType.encode(7n))
       break
     default:
       throw new Error(`fake ghost: ${method.name} not implemented`)
@@ -94,3 +106,82 @@ export function fakeBackend({
 }
 
 export const randomAddresses = (n: number) => Array.from({ length: n }, () => algosdk.generateAccount().addr.toString())
+
+/** A `algorand.query.run` request as the fake got it. */
+export type FakeQueryRun = {
+  params: {
+    program?: Uint8Array
+    clearProgram?: Uint8Array
+    globalSchema?: { numUint: number; numByteSlice: number }
+    appId?: bigint
+    sender?: string
+    rounds?: bigint[]
+    protocol?: string
+    calls: { args?: Uint8Array[]; accounts?: string[] }[]
+  }
+  options?: { signal?: AbortSignal; concurrency?: number }
+}
+
+type QueryManagerLike = { run: (params: FakeQueryRun['params'], options?: FakeQueryRun['options']) => Promise<unknown> }
+
+/**
+ * Answers `algorand.query.run` (the fork of algokit-utils) with `runExampleGhostArgs`, as the fork's `run` returns
+ * results: the latest round (0) is `LAST_ROUND`; `fail(round, callIndex)` fails a call, `roundError(round)` a round.
+ */
+export function fakeQuery(
+  algorand: AlgorandClient,
+  {
+    fail = () => undefined,
+    roundError = () => undefined,
+  }: { fail?: (round: bigint, callIndex: number) => string | undefined; roundError?: (round: bigint) => string | undefined } = {},
+) {
+  const runs: FakeQueryRun[] = []
+  const query = (algorand as unknown as { query: QueryManagerLike }).query
+  const spy = vi.spyOn(query, 'run').mockImplementation(async (params, options) => {
+    runs.push({ params, options })
+    const rounds = params.rounds?.length ? params.rounds : [0n]
+    return rounds.map((requested) => {
+      const round = requested === 0n ? LAST_ROUND : requested
+      const roundFailure = roundError(round)
+      const calls = params.calls.map((call, callIndex) => {
+        const failure = roundFailure ?? fail(round, callIndex)
+        if (failure === undefined) return { callIndex, round, ok: true, logs: runExampleGhostArgs(call.args ?? [], round), cost: 10 }
+        const kind = roundFailure !== undefined ? 'round' : 'call'
+        const error = Object.assign(new Error(`Query call ${callIndex} at round ${round} failed: ${failure}`), { kind, failureMessage: failure })
+        return { callIndex, round, ok: false, error }
+      })
+      return { round, calls }
+    })
+  })
+  return { runs, spy }
+}
+
+type SimulateManagerLike = { groups: (...args: unknown[]) => Promise<unknown>; rounds: (...args: unknown[]) => Promise<unknown> }
+
+/** Answers `algorand.simulate.groups` / `rounds` (the fork of algokit-utils) with `runExampleGhost`, recording each request. */
+export function fakeSimulate(algorand: AlgorandClient) {
+  const requests: { kind: 'groups' | 'rounds'; options: Record<string, unknown>; rounds?: bigint[]; groups: algosdk.Transaction[][] }[] = []
+  const simulate = (algorand as unknown as { simulate: SimulateManagerLike }).simulate
+  const outcomesAt = async (composers: { buildTransactions(): Promise<{ transactions: algosdk.Transaction[] }> }[], round: bigint) => {
+    const built = await Promise.all(composers.map((c) => c.buildTransactions()))
+    const outcomes = built.map(({ transactions }) => ({
+      round,
+      ok: true,
+      result: { confirmations: transactions.map((t) => ({ logs: runExampleGhost(t, round) })), simulateResponse: { txnGroups: [] } },
+    }))
+    return { built, outcomes }
+  }
+  const groups = vi.spyOn(simulate, 'groups').mockImplementation(async (composers, options) => {
+    const opts = options as Record<string, unknown>
+    const { built, outcomes } = await outcomesAt(composers as never, opts.round !== undefined ? BigInt(opts.round as bigint) : LAST_ROUND)
+    requests.push({ kind: 'groups', options: opts, groups: built.map((b) => b.transactions) })
+    return outcomes
+  })
+  const rounds = vi.spyOn(simulate, 'rounds').mockImplementation(async (composers, roundList, options) => {
+    const list = roundList as bigint[]
+    const perRound = await Promise.all(list.map((round) => outcomesAt(composers as never, round)))
+    requests.push({ kind: 'rounds', options: options as Record<string, unknown>, rounds: list, groups: perRound[0].built.map((b) => b.transactions) })
+    return list.map((round, r) => ({ round, groups: perRound[r].outcomes }))
+  })
+  return { requests, groups, rounds }
+}

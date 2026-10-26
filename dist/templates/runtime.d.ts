@@ -71,10 +71,27 @@ export type GhostkitSimulateLimits = {
     /** Whether `protocol: 'future'` and execution traces are allowed. */
     developerApi: boolean;
 };
-/** What ghostkit found about the node and libraries. */
+/** The query limits of a dtalgorand node with queries (`POST /v2/query`). */
+export type GhostkitQueryLimits = {
+    /** Most calls per query request. */
+    maxCalls: number;
+    /** Most rounds per query request. */
+    maxRounds: number;
+    /** The most opcode budget of each call, which each call gets by default. */
+    maxCallBudget: number;
+    /** The most log bytes of each call; 0 for the consensus limits (1,024 bytes, 32 logs). */
+    maxCallLogBytes: number;
+    /** The most bytes of a response's logs and errors; 0 for no limit. */
+    maxResponseBytes: number;
+};
+/**
+ * What ghostkit found about the node and libraries. A dtalgorand node has `query` when it has queries and the loaded
+ * dtalgorand forks can send them.
+ */
 export type GhostkitNode = {
     kind: 'dt';
     limits: GhostkitSimulateLimits;
+    query?: GhostkitQueryLimits;
 } | {
     kind: 'stock';
     limits: GhostkitSimulateLimits;
@@ -98,7 +115,10 @@ export type GhostkitProtocolOverride = {
 export type GhostkitGroupOutcome = {
     ok: true;
     logs: Uint8Array[][];
+    /** simulate: the group's fee usage, in millionths of the minimum fee */
     groupUsage?: number;
+    /** query: the opcode budget the group's app calls used */
+    cost?: number;
     protocolOverride?: GhostkitProtocolOverride;
 } | {
     ok: false;
@@ -121,8 +141,8 @@ export type GhostkitRequestOptions = Omit<GhostkitSimulateOptions, 'round' | 'pr
     protocol?: string;
 };
 /**
- * Runs ghost simulates. ghostkit picks `ghostkitDTBackend` or `ghostkitStockBackend`; pass your own to the SDK
- * constructor's `backend` to change how simulates are sent.
+ * Runs ghost simulates. ghostkit picks `ghostkitQueryBackend`, `ghostkitDTBackend` or `ghostkitStockBackend`; pass
+ * your own to the SDK constructor's `backend` to change how simulates are sent.
  */
 export interface GhostkitBackend {
     readonly name: string;
@@ -169,7 +189,10 @@ export type GhostkitRoundResult<V> = {
 /** Parameters of a generated SDK's constructor. */
 export type GhostkitSDKParams = {
     algorand: GkAlgorandClient;
-    /** The account the ghost calls are sent from. Defaults to the network's fee sink, which is funded at every round. */
+    /**
+     * The account the ghost calls are sent from. Defaults to the network's fee sink, which is funded at every round. On a
+     * node with queries it needn't be funded: queries check no fees or balances.
+     */
     readerAccount?: string;
     /** Call this deployed app instead of creating the ghost on the fly. */
     ghostAppId?: bigint;
@@ -182,14 +205,16 @@ export type GhostkitSDKParams = {
     /** Log diagnostics of each call. */
     debug?: boolean;
     /**
-     * How to simulate: `auto` (default) uses dtalgorand's extended simulate when algokit-utils and algosdk are the
-     * dtalgorand forks and the node reports its simulate limits, else one simulate per group. `dt` uses the extended
-     * simulate regardless of the node (with dtalgorand's default limits if it reports none), `stock` never; or pass your
-     * own `GhostkitBackend`.
+     * How to run ghost calls. With algokit-utils and algosdk the dtalgorand forks, `auto` (default) uses read-only queries
+     * (`POST /v2/query`) when the node has them, with dtalgorand's extended simulate for calls that need simulate (see the
+     * README) and as the fallback, and the extended simulate on a dtalgorand node without queries; else one simulate per
+     * group. `query` always queries, and throws for calls that need simulate. `dt` always uses the extended simulate
+     * (with dtalgorand's default limits if the node reports none), `stock` never; or pass your own `GhostkitBackend`.
      */
-    backend?: 'auto' | 'dt' | 'stock' | GhostkitBackend;
+    backend?: 'auto' | 'query' | 'dt' | 'stock' | GhostkitBackend;
     /**
-     * What each group pays in fees. Simulate checks fees, and a group's needs aren't known before it runs: consensus v42
+     * What each group pays in fees when it is simulated; queries check no fees, so this only applies on simulate.
+     * Simulate checks fees, and a group's needs aren't known before it runs: consensus v42
      * charges for large programs and app args, and inner transactions are paid for as the program issues them.
      * - a microAlgo amount (default 1,000,000, 1 Algo): the group's first app call pays this, the others the minimum fee.
      *   Nothing is paid, since the group is only simulated, but the reader must hold it at the round simulated.
@@ -211,8 +236,9 @@ type GkAwaitedAll<T> = T extends readonly unknown[] ? {
     -readonly [K in keyof T]: Awaited<T[K]>;
 } : Awaited<T>;
 /**
- * Finds out whether ghost simulates can use dtalgorand's extended simulate: the loaded algokit-utils and algosdk must be
- * the dtalgorand forks, and the node must report its simulate limits (`GET /v2/transactions/simulate/limits`).
+ * Finds out whether ghost calls can use dtalgorand's queries or extended simulate: the loaded algokit-utils and algosdk
+ * must be the dtalgorand forks, and the node must report its simulate limits (`GET /v2/transactions/simulate/limits`),
+ * with query limits for queries (and forks that have them).
  */
 export declare function ghostkitDetectNode(algorand: GkAlgorandClient): Promise<GhostkitNode>;
 /** One simulate request per group, as any algod takes them. */
@@ -224,6 +250,22 @@ export declare function ghostkitStockBackend(algorand: GkAlgorandClient, { concu
  * node allows, and rounds too.
  */
 export declare function ghostkitDTBackend(algorand: GkAlgorandClient, limits?: GhostkitSimulateLimits): GhostkitBackend;
+/**
+ * dtalgorand's read-only queries (`POST /v2/query`) through the fork of algokit-utils (`algorand.query.run`): every app
+ * call of the groups runs alone, at each round, and the calls of one program or app go in as few requests as the node's
+ * query limits allow. No fees, signatures or minimum balances are checked; every resource is available without
+ * references; each call gets the node's `maxCallBudget`. Validity, fees and the request options other than `protocol`
+ * and `signal` are ignored; groups that can't be queried (other than NoOp app calls that create an app or call one
+ * without programs, or with an access list, `rejectVersion`, a note, a lease or a rekey) make it throw an error named
+ * `GhostkitQueryUnsupported`.
+ *
+ * `limits` are the node's simulate limits: ghostkit sizes chunks by them, so that a run that falls back to simulate
+ * fits too (and anything that fits in a simulated group fits in queries).
+ */
+export declare function ghostkitQueryBackend(algorand: GkAlgorandClient, { limits, concurrency }?: {
+    limits?: GhostkitSimulateLimits;
+    concurrency?: number;
+}): GhostkitBackend;
 /** A call as the generated SDK method describes it. */
 type GkCallSpec = {
     signature: string;
@@ -244,16 +286,26 @@ type GkFeePlan = {
 } | {
     kind: 'min';
 };
+/** How a run builds its groups: who sends them, how they pay fees, and where their suggested params come from. */
+type GkBuild = {
+    reader: string;
+    fees: GkFeePlan;
+    params: () => Promise<GkSuggestedParams>;
+};
 /** A call ready to simulate: its groups, and how to decode its results. */
 type GkPreparedCall = {
     method: string;
     returnType: string;
     groupCount: number;
-    /** the call's groups, paying fees by the plan, with suggested params no older than `paramsMaxAge` ms */
-    groupsFor(fees: GkFeePlan, paramsMaxAge: number): GhostkitGroup[];
+    /** the call's groups, built as the run says */
+    groupsFor(build: GkBuild): GhostkitGroup[];
     /** app calls per group, and arg counts per app call, for debug */
     shape: Record<string, number>[][];
     options?: GhostkitSimulateOptions;
+    /** whether the reader must be the real sender: an ABI `account` argument can encode it (index 0) */
+    needsReader: boolean;
+    /** why the call must be simulated, not queried */
+    simulateOnly?: string;
 };
 type GkPending = {
     prepared: Promise<GkPreparedCall>;
@@ -270,9 +322,12 @@ type GkShared = {
     methods?: Map<string, GkArc56Contract['methods'][number]>;
     returnTypes: Map<string, string>;
     warned: Set<string>;
-    /** the backend `auto` fell back to after the node turned out not to support the extended simulate */
+    /** the backend `auto` fell back to after the node turned out not to support queries or the extended simulate */
     fallback?: GhostkitBackend;
+    /** why the node rejected querying a program or app (by `gkQueryKey`), which `auto` then simulates */
+    unqueryable: Map<string, string>;
 };
+type GkSuggestedParams = Awaited<ReturnType<GkAlgorandClient['getSuggestedParams']>>;
 /** The base of every ghostkit SDK. */
 export declare class GhostkitBase<TFactory, TClient> {
     algorand: GkAlgorandClient;
@@ -285,7 +340,7 @@ export declare class GhostkitBase<TFactory, TClient> {
     appSpec: GkArc56Contract;
     cacheParamsTimeout: number;
     debug: boolean;
-    backend: 'auto' | 'dt' | 'stock' | GhostkitBackend;
+    backend: 'auto' | 'query' | 'dt' | 'stock' | GhostkitBackend;
     ghostFee: GhostkitFee;
     protected _gkMeta: GhostkitMeta;
     protected _gkShared: GkShared;
@@ -306,8 +361,9 @@ export declare class GhostkitBase<TFactory, TClient> {
      * Runs the calls `fn` makes at each round, and returns their results per round. `fn` must return the calls'
      * promises (one, or an array) without awaiting them.
      *
-     * On a dtalgorand node the rounds and calls go in as few requests as its limits allow, rounds any distance apart; on a
-     * stock node each call is simulated at each round on its own, and only the last few rounds are available.
+     * On a dtalgorand node the rounds and calls go in as few requests as its limits allow, rounds any distance apart (with
+     * queries, one request per up to `maxCalls` app calls × `maxRounds` rounds, 1,024 × 16 by default); on a stock node
+     * each call is simulated at each round on its own, and only the last few rounds are available.
      *
      * @example
      * const balances = await sdk.atRounds([46_000_000n, 47_000_000n], (s) => s.acctBalanceData({ methodArgsOrArgsArray: { accounts } }))
@@ -315,8 +371,9 @@ export declare class GhostkitBase<TFactory, TClient> {
      */
     atRounds<const T extends Promise<unknown> | readonly Promise<unknown>[]>(rounds: GhostkitRound[], fn: (sdk: this) => T, options?: GhostkitRoundsOptions): Promise<GhostkitRoundResult<GkAwaitedAll<T>>[]>;
     /**
-     * Simulates the calls `fn` makes together: on a dtalgorand node in one request (or as few as its limits allow), on a
-     * stock node one request per call, concurrently. `fn` must return the calls' promises (one, or an array) without
+     * Simulates the calls `fn` makes together: on a dtalgorand node in one request (or as few as its limits allow; with
+     * queries, up to `maxCalls` app calls per request, 1,024 by default), on a stock node one request per call,
+     * concurrently. `fn` must return the calls' promises (one, or an array) without
      * awaiting them. Rejects with the first failed call's error.
      *
      * @example
@@ -329,9 +386,9 @@ export declare class GhostkitBase<TFactory, TClient> {
      */
     getNode(): Promise<GhostkitNode>;
     /**
-     * Fetches what the first simulate waits for, the node's limits and suggested params, concurrently. Calls fetch them
-     * anyway; this lets them arrive while the app does other work. Reads at the latest round use the params for
-     * `cacheParamsTimeout` ms, reads at past rounds for an hour.
+     * Fetches what the first call waits for: the node's limits, and suggested params unless the node has queries, which
+     * need none. Calls fetch them anyway; this lets them arrive while the app does other work. Simulates at the latest
+     * round use the params for `cacheParamsTimeout` ms, at past rounds for an hour.
      */
     prefetch(): Promise<void>;
     /** Runs a generated method's call: now, or as part of `batch` / `atRounds`. */
@@ -339,8 +396,14 @@ export declare class GhostkitBase<TFactory, TClient> {
     private _gkCollectWithShape;
     private _gkView;
     private _gkWarn;
+    /** The node's limits, as the forced backends read them: cached per AlgorandClient. */
+    private _gkLimits;
     /** The backend for this call. Detection is cached per AlgorandClient, so this costs no request after the first. */
     private _gkResolveBackend;
+    /** The backend `auto` simulates with when a run can't be queried. */
+    private _gkSimulateBackend;
+    /** The query limits for the pre-checks of a run on the query backend. */
+    private _gkQueryLimits;
     /** The reader: `readerAccount`, or the fee sink, known for MainNet and TestNet and otherwise read from the genesis once. */
     private _gkReader;
     /**
@@ -349,7 +412,7 @@ export declare class GhostkitBase<TFactory, TClient> {
      * one request.
      */
     private _gkParams;
-    /** A composer whose suggested params come from `_gkParams`, without touching the AlgorandClient's cache. */
+    /** A composer whose suggested params come from `params` (`_gkParams`, or none), without touching the AlgorandClient's cache. */
     private _gkComposer;
     private _gkPrograms;
     private _gkMethod;
@@ -359,8 +422,22 @@ export declare class GhostkitBase<TFactory, TClient> {
     private _gkPrepare;
     /** Splits a call's array argument into groups of app calls, sized to the node's limits. */
     private _gkChunk;
-    /** Simulates prepared calls at the target, with the dt backend falling back to stock if the node turns out not to support it. */
+    /**
+     * Runs prepared calls at the target. With `auto`, a run on the query backend goes to simulate when it can't be queried
+     * (`_gkQueryBlocker`) or the node rejects the query (`_gkQueryFallback`); the extended simulate falls back to one
+     * simulate per group if the node turns out not to support it.
+     */
     private _gkRun;
+    /** What `_gkShared.unqueryable` remembers the node's rejection of this SDK's queries by: the ghost program or the app. */
+    private _gkQueryKey;
+    /** Why a run must be simulated rather than queried, or undefined if it can be queried. */
+    private _gkQueryBlocker;
+    /**
+     * Whether `auto` simulates a run whose query failed with `e`, and why; undefined to throw. A group the query backend
+     * can't send and a request the node rejects (400) simulate this run; a node without queries (a load balancer mixing
+     * nodes) makes `auto` simulate from now on (`sticky`).
+     */
+    private _gkQueryFallback;
     /**
      * What the reader can spend at a round (the latest if undefined) over its minimum balance; undefined if unknown. A node
      * that can't read the account at the round (a stock node answers with the latest, a dtalgorand node without time travel
@@ -370,6 +447,7 @@ export declare class GhostkitBase<TFactory, TClient> {
     private _gkSpendableOf;
     /** How the run's groups pay fees: see `ghostFee`. */
     private _gkFeePlan;
+    /** Runs prepared calls on a backend; `fallback` is why `_gkRun` fell back to it, for debug. */
     private _gkRunOn;
     /** A hint for errors that a different node or reader would avoid. */
     private _gkHint;

@@ -15,9 +15,10 @@ import {
   GhostkitError,
   GhostV11SDK,
   ghostkitDetectNode,
+  ghostkitQueryBackend,
 } from './generated/GhostV11SDK'
 import { GhostV13SDK } from './generated/GhostV13SDK'
-import { fakeBackend, LAST_ROUND, offlineAlgorand, randomAddresses, READER } from './helpers'
+import { fakeBackend, fakeQuery, fakeSimulate, LAST_ROUND, offlineAlgorand, randomAddresses, READER } from './helpers'
 
 /** Whether the loaded algokit-utils is the dtalgorand fork (it adds `algorand.simulate`). */
 const forkUtils = Object.getOwnPropertyDescriptor(AlgorandClient.prototype, 'simulate') !== undefined
@@ -543,6 +544,263 @@ describe('with a stub node', () => {
       await expect(sdk.acctBalanceData({ methodArgsOrArgsArray: { accounts } })).rejects.toThrow(/than the reader \(.+\) can spend: 9900000 microAlgo/)
       sdk.ghostFee = 0
       await expect(sdk.acctBalanceData({ methodArgsOrArgsArray: { accounts } })).rejects.toThrow(/ghostFee is the minimum fee; 'max' pays/)
+    })
+  })
+
+  describe.runIf(forkUtils)('queries', () => {
+    const simulateLimits = {
+      'max-txn-groups': 16,
+      'max-rounds': 16,
+      'max-extra-opcode-budget': 640000,
+      'resource-limit-multiplier': 128,
+      'time-travel': true,
+      'developer-api': false,
+    }
+    const queryLimits = { 'max-calls': 1024, 'max-call-budget': 320000, 'max-call-log-bytes': 65536, 'max-response-bytes': 0, 'max-rounds': 16 }
+    /** Serves the simulate limits, with these query limits (none for null). */
+    const serve = (query: Record<string, number> | null = queryLimits) => {
+      routes['/v2/transactions/simulate/limits'] = { status: 200, body: { ...simulateLimits, ...(query ? { query } : {}) } }
+    }
+    const blk = (s: GhostV11SDK | GhostChunkSDK) => s.blkTimestamp({ methodArgsOrArgsArray: { firstRound: 1n, lastRound: 1n } })
+    /** An SDK on the stub node, its algorand.query.run and algorand.simulate faked. */
+    function setup<T extends GhostV11SDK | GhostChunkSDK | GhostBigSDK>(
+      Sdk: new (p: ConstructorParameters<typeof GhostV11SDK>[0]) => T,
+      params: Partial<ConstructorParameters<typeof GhostV11SDK>[0]> = {},
+      fakes: Parameters<typeof fakeQuery>[1] = {},
+    ) {
+      const algorand = offlineAlgorand(port())
+      const sdk = new Sdk({ algorand, cacheParamsTimeout: 0, ...params })
+      return { sdk, algorand, ...fakeQuery(algorand, fakes), simulated: fakeSimulate(algorand) }
+    }
+    beforeEach(() => serve())
+
+    test('detects a node with queries', async () => {
+      const node = await ghostkitDetectNode(offlineAlgorand(port()))
+      expect(node).toEqual({
+        kind: 'dt',
+        limits: { maxTxnGroups: 16, maxRounds: 16, maxExtraOpcodeBudget: 640000, resourceLimitMultiplier: 128, timeTravel: true, developerApi: false },
+        query: { maxCalls: 1024, maxRounds: 16, maxCallBudget: 320000, maxCallLogBytes: 65536, maxResponseBytes: 0 },
+      })
+      serve(null)
+      expect((await ghostkitDetectNode(offlineAlgorand(port()))) as { query?: unknown }).not.toHaveProperty('query')
+    })
+
+    test('queries the ghost program at the latest round, with no params, fee sink or balance requests', async () => {
+      const { sdk, algorand, runs, simulated } = setup(GhostV11SDK, { ghostFee: 'max' })
+      const fetches = vi.spyOn(algorand, 'getSuggestedParams')
+      const accounts = randomAddresses(2)
+      const data = await sdk.acctBalanceData({ methodArgsOrArgsArray: [{ accounts }, { accounts: accounts.slice(0, 1) }] })
+      expect(data.map((d) => d.address)).toEqual([...accounts, accounts[0]])
+      expect(data.map((d) => d.balance)).toEqual([1n, 2n, 1n])
+      expect(runs).toHaveLength(1)
+      const { params } = runs[0]
+      expect(Buffer.from(params.program!).toString('base64')).toBe(APP_SPEC.byteCode!.approval)
+      expect(Buffer.from(params.clearProgram!).toString('base64')).toBe(APP_SPEC.byteCode!.clear)
+      expect(params.sender).toBeUndefined() // the zero address: the round's fee sink
+      expect(params.rounds).toEqual([0n])
+      expect(params.protocol).toBe('round')
+      expect(params.calls).toHaveLength(2)
+      expect(params.calls.map((c) => c.args!.length)).toEqual([2, 2])
+      expect(fetches).not.toHaveBeenCalled()
+      expect(simulated.groups).not.toHaveBeenCalled()
+      expect(requests.filter((r) => !r.startsWith('/v2/transactions/simulate/limits'))).toEqual([])
+    })
+
+    test('runs past rounds under the latest protocol; null under their own, and a name as given', async () => {
+      const { sdk, runs } = setup(GhostV11SDK)
+      expect(await blk(sdk.atRound(500))).toEqual([10n + 500n])
+      await sdk.atRounds([5], (s) => blk(s), { protocol: null })
+      await sdk.atRounds([5], (s) => blk(s), { protocol: 'v40' })
+      await blk(sdk)
+      expect(runs.map((r) => [r.params.rounds, r.params.protocol])).toEqual([
+        [[500n], 'latest'],
+        [[5n], 'round'],
+        [[5n], 'v40'],
+        [[0n], 'round'],
+      ])
+    })
+
+    test('sends from readerAccount, and from the fee sink for an account argument', async () => {
+      const { sdk, runs } = setup(GhostChunkSDK, { readerAccount: READER })
+      await blk(sdk)
+      expect(runs[0].params.sender).toBe(READER)
+      routes['/genesis'] = { status: 200, body: { network: 'stubnet', fees: READER } }
+      const other = setup(GhostChunkSDK)
+      const [balance] = await other.sdk.accountBalance({ methodArgsOrArgsArray: { account: READER } })
+      expect(balance).toBe(7n)
+      expect(other.runs[0].params.sender).toBe(READER)
+      expect(requests.filter((r) => r === '/genesis')).toHaveLength(1)
+    })
+
+    test('atRounds: one request for every round, and a round that fails on its own', async () => {
+      const { sdk, runs } = setup(GhostV11SDK, {}, { roundError: (round) => (round === 20n ? 'round 20 is not available' : undefined) })
+      const results = await sdk.atRounds([10, 20n, 30], (s) => blk(s))
+      expect(runs).toHaveLength(1)
+      expect(runs[0].params.rounds).toEqual([10n, 20n, 30n])
+      expect(results.map((r) => r.round)).toEqual([10n, 20n, 30n])
+      expect(results.map((r) => (r.ok ? r.value : r.error.round))).toEqual([[20n], 20n, [40n]])
+      const failed = results[1]
+      if (failed.ok) throw new Error('round 20 should fail')
+      expect(failed.error.message).toMatch(/Could not query group 0 at round 20: round 20 is not available/)
+    })
+
+    test('batch: the calls go in one request, a chunked call keeps its results together', async () => {
+      const { sdk, runs } = setup(GhostChunkSDK)
+      const accounts = randomAddresses(300)
+      const [ts, data] = await sdk.batch((s) => [blk(s), s.acctBalanceData({ methodArgsOrArgsArray: { accounts } })])
+      expect(ts).toEqual([10n + LAST_ROUND])
+      expect(data.map((d) => d.address)).toEqual(accounts)
+      expect(runs).toHaveLength(1)
+      // chunked as for the dtalgorand simulate: 127 addresses per app call
+      expect(runs[0].params.calls).toHaveLength(1 + 3)
+    })
+
+    test('a failed app call fails its group, with where and why', async () => {
+      const failure = 'logic eval error: program version 13 greater than protocol supported version 6'
+      const { sdk } = setup(GhostV11SDK, {}, { fail: (_, callIndex) => (callIndex === 1 ? failure : undefined) })
+      const promise = sdk.atRound(5).blkTimestamp({ methodArgsOrArgsArray: [{ firstRound: 1n, lastRound: 1n }, { firstRound: 1n, lastRound: 1n }] })
+      await expect(promise).rejects.toBeInstanceOf(GhostkitError)
+      const error = (await promise.catch((e) => e)) as GhostkitError
+      expect(error.failedAt).toEqual([1])
+      expect(error.failureMessage).toBe(failure)
+      expect(error.message).toMatch(/Querying group 0 at round 5 failed at transaction 1: .*leave protocol unset or set it to 'latest'/)
+    })
+
+    test('routes calls that need simulate to the extended simulate', async () => {
+      const { sdk, runs, simulated } = setup(GhostV11SDK, { readerAccount: READER, ghostFee: 0 })
+      await sdk.batch((s) => blk(s), { execTraceConfig: { enable: true } } as never)
+      await sdk.batch((s) => blk(s), { extraOpcodeBudget: 400_000 })
+      await sdk.atRounds([5], (s) => blk(s), { validityWindow: null })
+      await sdk.blkTimestamp({ methodArgsOrArgsArray: { firstRound: 1n, lastRound: 1n }, extraMethodCallArgs: { note: 'hi' } })
+      await sdk.atRound(5).blkTimestamp({
+        methodArgsOrArgsArray: { firstRound: 1n, lastRound: 1n },
+        extraMethodCallArgs: { firstValidRound: 4n, lastValidRound: 6n },
+      })
+      expect(runs).toHaveLength(0)
+      expect(simulated.requests.map((r) => r.kind)).toEqual(['groups', 'groups', 'rounds', 'groups', 'groups'])
+      // within the budget: queried
+      await sdk.batch((s) => blk(s), { extraOpcodeBudget: 300_000 })
+      expect(runs).toHaveLength(1)
+    })
+
+    test('simulates when the node logs less than allowMoreLogging', async () => {
+      serve({ ...queryLimits, 'max-call-log-bytes': 0 })
+      const { sdk, runs, simulated } = setup(GhostV11SDK, { readerAccount: READER, ghostFee: 0 })
+      await blk(sdk)
+      await sdk.batch((s) => blk(s), { allowMoreLogging: false })
+      expect(simulated.requests).toHaveLength(1)
+      expect(runs).toHaveLength(1)
+    })
+
+    test("backend 'query' throws for calls that need simulate; 'dt' never queries", async () => {
+      const { sdk, runs, simulated } = setup(GhostV11SDK, { readerAccount: READER, ghostFee: 0, backend: 'query' })
+      await expect(sdk.batch((s) => blk(s), { extraOpcodeBudget: 400_000 })).rejects.toThrow(/backend 'query' can't run this call: extraOpcodeBudget/)
+      expect(await blk(sdk)).toHaveLength(1)
+      sdk.backend = 'dt'
+      await blk(sdk)
+      expect(runs).toHaveLength(1)
+      expect(simulated.requests).toHaveLength(1)
+    })
+
+    test('simulates a run the node rejects (400), and remembers a program it rejects', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      try {
+        routes['/v2/query'] = { status: 400, body: { message: 'program and clear-program are 9007 bytes, more than the 8192 an app may have' } }
+        const algorand = offlineAlgorand(port())
+        const sdk = new GhostBigSDK({ algorand, readerAccount: READER, ghostFee: 0, cacheParamsTimeout: 0 })
+        const simulated = fakeSimulate(algorand)
+        const run = vi.spyOn((algorand as unknown as { query: { run: () => Promise<unknown> } }).query, 'run')
+        expect(await sdk.acctBalanceData({ methodArgsOrArgsArray: { accounts: randomAddresses(2) } })).toHaveLength(2)
+        expect(await sdk.acctBalanceData({ methodArgsOrArgsArray: { accounts: randomAddresses(2) } })).toHaveLength(2)
+        expect(run).toHaveBeenCalledTimes(1)
+        expect(simulated.requests).toHaveLength(2)
+        expect(warn.mock.calls.filter(([m]) => /the node rejected a query/.test(String(m)))).toHaveLength(1)
+
+        // a round after the latest is about the round: the next run queries again
+        routes['/v2/query'] = { status: 400, body: { message: 'round 2000 is after the latest round 1000' } }
+        const v11 = setup(GhostV11SDK, { readerAccount: READER, ghostFee: 0 })
+        v11.spy.mockRestore()
+        const queried = vi.spyOn((v11.algorand as unknown as { query: { run: () => Promise<unknown> } }).query, 'run')
+        await blk(v11.sdk.atRound(2000))
+        await blk(v11.sdk.atRound(2000))
+        expect(queried).toHaveBeenCalledTimes(2)
+        expect(v11.simulated.requests).toHaveLength(2)
+      } finally {
+        warn.mockRestore()
+      }
+    })
+
+    test('falls back to the extended simulate for good when the node has no queries after all', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      try {
+        const { sdk, spy, simulated } = setup(GhostV11SDK, { readerAccount: READER, ghostFee: 0 })
+        spy.mockRejectedValue(Object.assign(new Error('The node has no query endpoint'), { name: 'DTUnsupportedError' }))
+        await blk(sdk)
+        await blk(sdk)
+        expect(spy).toHaveBeenCalledTimes(1)
+        expect(simulated.requests).toHaveLength(2)
+      } finally {
+        warn.mockRestore()
+      }
+    })
+
+    test('a group the query backend refuses is simulated', async () => {
+      const { sdk, spy, simulated } = setup(GhostV11SDK, { readerAccount: READER, ghostFee: 0 })
+      spy.mockRejectedValueOnce(Object.assign(new Error("ghostkit: can't query the group"), { name: 'GhostkitQueryUnsupported' }))
+      expect(await blk(sdk)).toHaveLength(1)
+      expect(simulated.requests).toHaveLength(1)
+      await blk(sdk)
+      expect(spy).toHaveBeenCalledTimes(2)
+    })
+
+    test('the query backend refuses groups that are not plain NoOp app calls', async () => {
+      const algorand = offlineAlgorand(port())
+      const backend = ghostkitQueryBackend(algorand)
+      const group = async () =>
+        algorand.newGroup().addPayment({ sender: READER, receiver: READER, amount: (0).microAlgo(), signer: algosdk.makeEmptyTransactionSigner() })
+      await expect(backend.simulate([group], {})).rejects.toMatchObject({ name: 'GhostkitQueryUnsupported' })
+    })
+
+    test("an abort rejects, and isn't simulated", async () => {
+      const { sdk, spy, simulated } = setup(GhostV11SDK, { readerAccount: READER, ghostFee: 0 })
+      const controller = new AbortController()
+      controller.abort()
+      spy.mockImplementation(async (_params, options) => {
+        options?.signal?.throwIfAborted()
+        return []
+      })
+      await expect(sdk.batch((s) => blk(s), { signal: controller.signal } as never)).rejects.toMatchObject({ name: 'AbortError' })
+      expect(spy.mock.calls[0][1]?.signal).toBe(controller.signal)
+      expect(simulated.requests).toHaveLength(0)
+    })
+
+    test('debug lines', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      try {
+        const { sdk } = setup(GhostV11SDK, { readerAccount: READER, ghostFee: 0, debug: true })
+        await blk(sdk)
+        await sdk.batch((s) => blk(s), { extraOpcodeBudget: 400_000 })
+        const lines = warn.mock.calls.map(([m]) => String(m))
+        expect(lines[0]).toMatch(/Ghostkit pre .* backend=query at=latest groups=1 txns=1 \[/)
+        expect(lines[0]).not.toMatch(/fee=/)
+        expect(lines[1]).toMatch(/Ghostkit post .* cost=10$/)
+        expect(lines[2]).toMatch(/Ghostkit fallback .* to=dt reason=extraOpcodeBudget 400000/)
+        expect(lines[3]).toMatch(/Ghostkit pre .* backend=dt .* fee=min/)
+      } finally {
+        warn.mockRestore()
+      }
+    })
+
+    test('prefetch() fetches no params for queries', async () => {
+      const { sdk, algorand } = setup(GhostV11SDK)
+      const fetches = vi.spyOn(algorand, 'getSuggestedParams')
+      await sdk.prefetch()
+      expect(fetches).not.toHaveBeenCalled()
+      serve(null)
+      const other = setup(GhostV11SDK)
+      const otherFetches = vi.spyOn(other.algorand, 'getSuggestedParams')
+      await other.sdk.prefetch()
+      expect(otherFetches).toHaveBeenCalledTimes(1)
     })
   })
 })

@@ -56,6 +56,8 @@ export default async function setup() {
         readonlyMethod('memoBalances', [{ type: 'address[]', name: 'accounts' }, { type: 'byte[]', name: 'memo' }]),
         // not in the program either: a dynamic return type, for decoding
         readonlyMethod('accountNotes', [{ type: 'address[]', name: 'accounts' }], '(address,string)'),
+        // not in the program either: an ABI account reference, which can encode the sender
+        readonlyMethod('accountBalance', [{ type: 'account', name: 'account' }]),
       ],
     },
   ]

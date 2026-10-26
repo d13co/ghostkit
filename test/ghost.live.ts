@@ -1,7 +1,8 @@
 // Live checks. Each node's suite is skipped unless its server is set:
 //   ALGOD_SERVER=http://localhost:4001       a stock algod on LocalNet (consensus v42), token ALGOD_TOKEN (default aaa…)
 //   DT_ALGOD_SERVER=http://host:port         a MainNet dtalgorand node with time travel, token DT_ALGOD_TOKEN
-// Runs with both builds of algokit-utils (see vitest.config.ts): the dtalgorand fork batches simulates, stock doesn't.
+// Runs with both builds of algokit-utils (see vitest.config.ts): the dtalgorand fork batches simulates and queries (on a
+// node with POST /v2/query), stock doesn't.
 import { AlgorandClient } from '@algorandfoundation/algokit-utils'
 import algosdk from 'algosdk'
 import { beforeAll, describe, expect, test } from 'vitest'
@@ -132,19 +133,54 @@ describe.skipIf(!dtServer)('dtalgorand node (MainNet)', () => {
   let last: bigint
   // a dtalgorand node that doesn't report its simulate limits is only used as one when forced
   let hasLimits = false
+  // whether the node has queries (POST /v2/query), which the fork then uses
+  let hasQuery = false
   let backend: 'auto' | 'dt' = 'auto'
 
   beforeAll(async () => {
     last = (await algorand.client.algod.status().do()).lastRound
     const res = await fetch(new URL('/v2/transactions/simulate/limits', dtServer), { headers: { 'X-Algo-API-Token': token } })
     hasLimits = res.ok
+    hasQuery = hasLimits && (await res.json()).query !== undefined
     backend = fork && !hasLimits ? 'dt' : 'auto'
     sdk.backend = backend
   })
 
-  test('detects the node by its simulate limits', async () => {
+  test('detects the node by its simulate limits, and its queries', async () => {
     const node = await new GhostV11SDK({ algorand }).getNode()
     expect(node.kind).toBe(fork && hasLimits ? 'dt' : 'stock')
+    expect(node.kind === 'dt' && node.query !== undefined).toBe(fork && hasQuery)
+  })
+
+  test('queries give what the extended simulate gives', async (ctx) => {
+    if (!fork || !hasQuery) ctx.skip()
+    const feeSink = 'Y76M3MSY6DKBRHBL7C3NNDXGS5IIMQVQVUAB6MP4XEMMGVF2QWNPL226CA'
+    const rounds = [OLD, MID, last - 10n]
+    const read = async (via: 'query' | 'dt') => {
+      const s = new GhostV11SDK({ algorand, backend: via })
+      const balances = await s.atRounds(rounds, (v) => v.acctBalanceData({ methodArgsOrArgsArray: { accounts: [proposer, feeSink] } }))
+      const blocks = await Promise.all(rounds.map((r) => s.atRound(r).blkData({ methodArgsOrArgsArray: { firstRound: r - 3n, lastRound: r } })))
+      return { balances, blocks }
+    }
+    const queried = await read('query')
+    const simulated = await read('dt')
+    for (const r of queried.balances) if (!r.ok) throw r.error
+    expect(queried).toEqual(simulated)
+    expect(queried.balances[0].protocolOverride?.applied).toBe(true)
+  })
+
+  test('an unfunded reader reads through queries', async (ctx) => {
+    if (!fork || !hasQuery) ctx.skip()
+    const unfunded = new GhostV11SDK({ algorand, readerAccount: randomAddresses(1)[0] })
+    const [data] = await unfunded.acctBalanceData({ methodArgsOrArgsArray: { accounts: [proposer] } })
+    expect(data.address).toBe(proposer)
+  })
+
+  test('runs a ghost with more than 3 extra pages at the latest round', async () => {
+    const big = new GhostBigSDK({ algorand, backend })
+    const accounts = randomAddresses(2)
+    expect(await big.acctBalanceData({ methodArgsOrArgsArray: { accounts } })).toHaveLength(2)
+    expect(await big.acctBalanceData({ methodArgsOrArgsArray: { accounts } })).toHaveLength(2)
   })
 
   test('reads balances at rounds years apart, matching the node', async () => {
