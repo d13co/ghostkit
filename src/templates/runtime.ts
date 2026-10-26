@@ -258,6 +258,7 @@ export const GHOSTKIT_RESERVED_MEMBERS: readonly string[] = Object.freeze([
   'atRounds',
   'batch',
   'getNode',
+  'prefetch',
   // Object.prototype
   'toString',
   'toLocaleString',
@@ -348,8 +349,35 @@ async function gkMapLimit<T, R>(items: T[], limit: number, fn: (item: T, index: 
 /** The validity window for a simulate at `round`: valid only in block round + 1, so `block` can look back the furthest. */
 const gkValidityAt = (round: bigint) => ({ firstValidRound: round + 1n, lastValidRound: round + 1n })
 
-/** Reads a dtalgorand node's simulate limits, or `undefined` if the node doesn't report them. */
+/**
+ * Reads a dtalgorand node's simulate limits, or `undefined` if the node doesn't report them. With the fork of algosdk
+ * they come from `DTAlgodClient.simulateLimits()`, which caches them per algod client and is what the fork of
+ * algokit-utils reads before each extended simulate, so the node is asked once.
+ */
 async function gkFetchLimits(algorand: GkAlgorandClient): Promise<GhostkitSimulateLimits | undefined> {
+  const dt = (
+    gkAlgosdk as unknown as {
+      DTAlgodClient?: {
+        features?: readonly string[]
+        from?: (algod: unknown) => { simulateLimits?: () => Promise<GhostkitSimulateLimits & { reported?: boolean }> }
+      }
+    }
+  ).DTAlgodClient
+  if (dt?.features?.includes('simulate-limits') && typeof dt.from === 'function') {
+    const client = dt.from(algorand.client.algod)
+    if (typeof client.simulateLimits === 'function') {
+      const limits = await client.simulateLimits()
+      if (!limits.reported) return undefined
+      return {
+        maxTxnGroups: Math.max(1, limits.maxTxnGroups),
+        maxRounds: limits.maxRounds,
+        maxExtraOpcodeBudget: limits.maxExtraOpcodeBudget,
+        resourceLimitMultiplier: Math.max(1, limits.resourceLimitMultiplier),
+        timeTravel: limits.timeTravel === true,
+        developerApi: limits.developerApi === true,
+      }
+    }
+  }
   const http = (algorand.client.algod as unknown as { c?: { get?: (o: { relativePath: string }) => Promise<{ text?: string; body?: Uint8Array }> } }).c
   if (typeof http?.get !== 'function') return undefined
   let res: { text?: string; body?: Uint8Array }
@@ -686,6 +714,15 @@ export class GhostkitBase<TFactory, TClient> {
     return gkRemember(gkCacheOf(this.algorand), 'node', () => ghostkitDetectNode(this.algorand))
   }
 
+  /**
+   * Fetches what the first simulate waits for, the node's limits and suggested params, concurrently. Calls fetch them
+   * anyway; this lets them arrive while the app does other work. Reads at the latest round use the params for
+   * `cacheParamsTimeout` ms, reads at past rounds for an hour.
+   */
+  async prefetch(): Promise<void> {
+    await Promise.all([this._gkResolveBackend(), this._gkParams(GK_PAST_PARAMS_MAX_AGE)])
+  }
+
   /** Runs a generated method's call: now, or as part of `batch` / `atRounds`. */
   protected _gkCall<T>(spec: GkCallSpec, input: GhostkitMethodInput<unknown>, params: GkParamsBuilder): Promise<T[]> {
     if (this._gkCollector) {
@@ -1015,8 +1052,9 @@ export class GhostkitBase<TFactory, TClient> {
   ): Promise<{ round?: bigint; protocolOverride?: GhostkitProtocolOverride; calls: ({ ok: true; value: unknown[] } | { ok: false; error: GhostkitError })[] }[]> {
     // calls at the latest round need fresh params for their validity window; calls at past rounds set their own
     const paramsMaxAge = target.kind === 'latest' ? this.cacheParamsTimeout : GK_PAST_PARAMS_MAX_AGE
-    const minFee = BigInt((await this._gkParams(paramsMaxAge)).minFee)
-    let backend = await this._gkResolveBackend()
+    const [params, resolved] = await Promise.all([this._gkParams(paramsMaxAge), this._gkResolveBackend()])
+    const minFee = BigInt(params.minFee)
+    let backend = resolved
     try {
       return await this._gkRunOn(backend, calls, target, options, minFee, paramsMaxAge)
     } catch (e) {

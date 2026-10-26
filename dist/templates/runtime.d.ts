@@ -328,6 +328,12 @@ export declare class GhostkitBase<TFactory, TClient> {
      * AlgorandClient.
      */
     getNode(): Promise<GhostkitNode>;
+    /**
+     * Fetches what the first simulate waits for, the node's limits and suggested params, concurrently. Calls fetch them
+     * anyway; this lets them arrive while the app does other work. Reads at the latest round use the params for
+     * `cacheParamsTimeout` ms, reads at past rounds for an hour.
+     */
+    prefetch(): Promise<void>;
     /** Runs a generated method's call: now, or as part of `batch` / `atRounds`. */
     protected _gkCall<T>(spec: GkCallSpec, input: GhostkitMethodInput<unknown>, params: GkParamsBuilder): Promise<T[]>;
     private _gkCollectWithShape;
