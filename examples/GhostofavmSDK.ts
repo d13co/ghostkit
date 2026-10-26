@@ -2686,7 +2686,8 @@ export class GhostkitBase<TFactory, TClient> {
       // the node won't query a program this large (older dtalgod checked the pre-v42 size limit): remember it, for this
       // SDK instance
       if (/bytes, more than the \d+ an app may have/.test(message)) this._gkShared.unqueryable.set(this._gkQueryKey(), message)
-      this._gkWarn('query-400', `the node rejected a query (${message}); simulating instead`)
+      // a round after the latest gives the same results through simulate (a per-round error), so it isn't worth a warning
+      if (!/after the latest round/.test(message)) this._gkWarn('query-400', `the node rejected a query (${message}); simulating instead`)
       return { message: `the node rejected the query: ${message}` }
     }
     return undefined

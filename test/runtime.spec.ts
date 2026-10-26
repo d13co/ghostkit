@@ -716,7 +716,8 @@ describe('with a stub node', () => {
         expect(simulated.requests).toHaveLength(2)
         expect(warn.mock.calls.filter(([m]) => /the node rejected a query/.test(String(m)))).toHaveLength(1)
 
-        // a round after the latest is about the round: the next run queries again
+        // a round after the latest is about the round: the next run queries again, and simulate says the same, silently
+        warn.mockClear()
         routes['/v2/query'] = { status: 400, body: { message: 'round 2000 is after the latest round 1000' } }
         const v11 = setup(GhostV11SDK, { readerAccount: READER, ghostFee: 0 })
         v11.spy.mockRestore()
@@ -725,6 +726,7 @@ describe('with a stub node', () => {
         await blk(v11.sdk.atRound(2000))
         expect(queried).toHaveBeenCalledTimes(2)
         expect(v11.simulated.requests).toHaveLength(2)
+        expect(warn).not.toHaveBeenCalled()
       } finally {
         warn.mockRestore()
       }
