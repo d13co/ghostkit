@@ -1245,6 +1245,11 @@ export type GhostkitSimulateOptions = Omit<GkRawSimulateOptions, 'allowEmptySign
    * simulates each round under its own protocol.
    */
   protocol?: string | null
+  /**
+   * Cancels the call's requests; the call rejects with the signal's reason, whatever the backend. Shared reads (limits,
+   * suggested params, the fee sink, the reader's balance) carry on for other callers.
+   */
+  signal?: AbortSignal
 }
 
 /** Options for simulating at several rounds. */
@@ -1657,6 +1662,11 @@ async function gkMapLimit<T, R>(items: T[], limit: number, fn: (item: T, index: 
   return results
 }
 
+/** Throws the signal's reason if it is aborted (`AbortSignal.throwIfAborted`, which older DOM typings lack). */
+function gkThrowIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw signal.reason
+}
+
 /** The validity window for a simulate at `round`: valid only in block round + 1, so `block` can look back the furthest. */
 const gkValidityAt = (round: bigint) => ({ firstValidRound: round + 1n, lastValidRound: round + 1n })
 
@@ -1766,6 +1776,7 @@ export async function ghostkitDetectNode(algorand: GkAlgorandClient): Promise<Gh
 export function ghostkitStockBackend(algorand: GkAlgorandClient, { concurrency = 8 }: { concurrency?: number } = {}): GhostkitBackend {
   const simulateOne = async (group: GhostkitGroup, options: GhostkitRequestOptions, round?: bigint): Promise<GhostkitGroupOutcome> => {
     try {
+      gkThrowIfAborted(options.signal)
       const { protocol, ...raw } = options
       if (protocol) throw new Error(`protocol '${protocol}' needs a dtalgorand node`)
       const composer = await group(round !== undefined ? gkValidityAt(round) : undefined)
@@ -1776,6 +1787,8 @@ export function ghostkitStockBackend(algorand: GkAlgorandClient, { concurrency =
         groupUsage: (result.simulateResponse.txnGroups[0] as { groupUsage?: number } | undefined)?.groupUsage,
       }
     } catch (e) {
+      // an abort rejects the whole call, as on the other backends, rather than failing this group
+      gkThrowIfAborted(options.signal)
       return { ok: false, error: gkAsError(e) }
     }
   }
@@ -1949,7 +1962,7 @@ export function ghostkitQueryBackend(
   const manager = gkQueryManager(algorand)
   if (!manager) throw new Error('ghostkit: the query backend needs the dtalgorand forks of algokit-utils and algosdk with queries (algorand.query)')
   const query = async (groups: GhostkitGroup[], rounds: bigint[], options: GhostkitRequestOptions): Promise<GhostkitRoundOutcome[]> => {
-    const signal = (options as { signal?: AbortSignal }).signal
+    const signal = options.signal
     if (groups.length === 0) return rounds.map((round) => ({ round, groups: [] }))
     const built = await Promise.all(groups.map(async (g) => (await g(undefined)).buildTransactions()))
     // the calls by target: normally one, the ghost program or app, from the reader
@@ -2614,7 +2627,7 @@ export class GhostkitBase<TFactory, TClient> {
         try {
           return await this._gkRunOn(backend, calls, target, options)
         } catch (e) {
-          const signal = ({ ...options, ...calls[0]?.options } as { signal?: AbortSignal }).signal
+          const signal = { ...options, ...calls[0]?.options }.signal
           const reason = auto && !signal?.aborted ? this._gkQueryFallback(e) : undefined
           if (!reason) throw e
           fallback = reason.message
@@ -2761,6 +2774,8 @@ export class GhostkitBase<TFactory, TClient> {
       round?: unknown
     }
     const raw = { extraOpcodeBudget: 170_000, allowMoreLogging: true, allowUnnamedResources: true, ...rest }
+    // every backend, custom ones included, rejects an aborted call with the reason, before and after its requests
+    gkThrowIfAborted(rest.signal)
     // Ghosts are compiled for recent AVM versions (and maybe v42's larger programs), which older rounds' protocols
     // reject. On a dtalgorand node past rounds run under the latest protocol, a no-op at rounds already on it.
     const past = target.kind !== 'latest'
@@ -2805,6 +2820,7 @@ export class GhostkitBase<TFactory, TClient> {
       const round = target.kind === 'round' ? target.round : undefined
       rounds = [{ round: round ?? 0n, groups: await backend.simulate(groups, { ...request, round }) }]
     }
+    gkThrowIfAborted(rest.signal)
     const simEnd = debug ? performance.now() : 0
 
     const structs = this.appSpec.structs

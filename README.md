@@ -290,6 +290,8 @@ Every method also takes an optional `extraSimulateArgs`, spread **over** the SDK
 
 Signatures are skipped: the reader account never signs. `extraSimulateArgs.protocol` overrides the protocol on a dtalgorand node (see [Past rounds](#past-rounds)), and `extraSimulateArgs.round` is the same as `atRound(round)`.
 
+`signal` (an `AbortSignal`) cancels the call's requests, on any backend: the call (or `batch` / `atRounds`, which take it in their options) rejects with the signal's reason, rather than resolving with failed rounds. Reads the SDK shares between calls (the node's limits, suggested params, the fee sink, the reader's balance) carry on for the other callers.
+
 **With queries.** A query has no simulate options of its own: it gives each app call the node's `maxCallBudget` and up to `maxCallLogBytes` of logs, makes every resource available, and runs each app call alone (`global GroupSize` is 1, no `gtxn`, and `global OpcodeBudget` starts at `maxCallBudget` rather than the group's pooled budget). With `backend: 'auto'`, ghostkit simulates a call instead when:
 
 - `execTraceConfig` is enabled;

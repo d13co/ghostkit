@@ -16,6 +16,7 @@ import {
   GhostV11SDK,
   ghostkitDetectNode,
   ghostkitQueryBackend,
+  ghostkitStockBackend,
 } from './generated/GhostV11SDK'
 import { GhostV13SDK } from './generated/GhostV13SDK'
 import { fakeBackend, fakeQuery, fakeSimulate, LAST_ROUND, offlineAlgorand, randomAddresses, READER } from './helpers'
@@ -206,6 +207,66 @@ describe('atRounds', () => {
     const { sdk, calls } = sdkWith(GhostV11SDK)
     await sdk.atRounds([5], (s) => s.blkTimestamp({ methodArgsOrArgsArray: { firstRound: 1n, lastRound: 1n } }), { validityWindow: null })
     expect(calls[0].options.validityWindow).toBeUndefined()
+  })
+})
+
+describe('abort', () => {
+  const blk = (s: GhostV11SDK) => s.blkTimestamp({ methodArgsOrArgsArray: { firstRound: 1n, lastRound: 1n } })
+  const aborted = () => {
+    const controller = new AbortController()
+    controller.abort()
+    return controller.signal
+  }
+
+  test('an aborted call rejects with the reason on the stock backend, and sends nothing', async () => {
+    const algorand = offlineAlgorand()
+    const sdk = new GhostV11SDK({ algorand, readerAccount: READER, ghostFee: 100_000n, cacheParamsTimeout: 0, backend: 'stock' })
+    const signal = aborted()
+    const params = vi.spyOn(algorand, 'getSuggestedParams')
+    await expect(sdk.batch((s) => blk(s), { signal })).rejects.toBe(signal.reason)
+    await expect(sdk.atRounds([10, 20], (s) => blk(s), { signal })).rejects.toBe(signal.reason)
+    expect(params).not.toHaveBeenCalled()
+    await expect(sdk.blkTimestamp({ methodArgsOrArgsArray: { firstRound: 1n, lastRound: 1n }, extraSimulateArgs: { signal } })).rejects.toMatchObject({
+      name: 'AbortError',
+    })
+  })
+
+  test('the stock backend rejects when the signal aborts during a simulate, and fails only the group otherwise', async () => {
+    const backend = ghostkitStockBackend(offlineAlgorand())
+    const controller = new AbortController()
+    const abortsMidway = async () => {
+      controller.abort()
+      throw new Error('fetch failed')
+    }
+    await expect(backend.simulateRounds([abortsMidway], [10n, 20n], { signal: controller.signal })).rejects.toMatchObject({ name: 'AbortError' })
+    await expect(backend.simulate([abortsMidway], { signal: controller.signal })).rejects.toMatchObject({ name: 'AbortError' })
+
+    const fails = async () => {
+      throw new Error('fetch failed')
+    }
+    const live = new AbortController()
+    const outcomes = await backend.simulateRounds([fails], [10n], { signal: live.signal })
+    expect(outcomes[0].groups[0]).toMatchObject({ ok: false, error: { message: 'fetch failed' } })
+  })
+
+  test('a call aborted while a backend runs rejects with the reason, whatever the backend returns', async () => {
+    const fake = fakeBackend({ fail: () => true })
+    const controller = new AbortController()
+    const simulateRounds = fake.backend.simulateRounds.bind(fake.backend)
+    fake.backend.simulateRounds = async (...args) => {
+      const outcomes = await simulateRounds(...args)
+      controller.abort(new Error('navigated away'))
+      return outcomes
+    }
+    const { sdk } = sdkWith(GhostV11SDK, fake)
+    await expect(sdk.atRounds([10, 20], (s) => blk(s), { signal: controller.signal })).rejects.toThrow('navigated away')
+    expect(fake.calls).toHaveLength(1)
+  })
+
+  test('without an abort, a failed round still resolves with ok: false', async () => {
+    const { sdk } = sdkWith(GhostV11SDK, fakeBackend({ fail: (round) => round === 20n }))
+    const results = await sdk.atRounds([10, 20], (s) => blk(s), { signal: new AbortController().signal })
+    expect(results.map((r) => r.ok)).toEqual([true, false])
   })
 })
 
@@ -765,14 +826,18 @@ describe('with a stub node', () => {
 
     test("an abort rejects, and isn't simulated", async () => {
       const { sdk, spy, simulated } = setup(GhostV11SDK, { readerAccount: READER, ghostFee: 0 })
+      // aborted while the query runs: the query gets the signal, and auto doesn't fall back to simulate
       const controller = new AbortController()
-      controller.abort()
       spy.mockImplementation(async (_params, options) => {
+        controller.abort()
         options?.signal?.throwIfAborted()
         return []
       })
-      await expect(sdk.batch((s) => blk(s), { signal: controller.signal } as never)).rejects.toMatchObject({ name: 'AbortError' })
+      await expect(sdk.batch((s) => blk(s), { signal: controller.signal })).rejects.toMatchObject({ name: 'AbortError' })
       expect(spy.mock.calls[0][1]?.signal).toBe(controller.signal)
+      // aborted before: nothing is sent
+      await expect(sdk.batch((s) => blk(s), { signal: controller.signal })).rejects.toMatchObject({ name: 'AbortError' })
+      expect(spy).toHaveBeenCalledTimes(1)
       expect(simulated.requests).toHaveLength(0)
     })
 

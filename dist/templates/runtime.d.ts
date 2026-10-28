@@ -14,6 +14,11 @@ export type GhostkitSimulateOptions = Omit<GkRawSimulateOptions, 'allowEmptySign
      * simulates each round under its own protocol.
      */
     protocol?: string | null;
+    /**
+     * Cancels the call's requests; the call rejects with the signal's reason, whatever the backend. Shared reads (limits,
+     * suggested params, the fee sink, the reader's balance) carry on for other callers.
+     */
+    signal?: AbortSignal;
 };
 /** Options for simulating at several rounds. */
 export type GhostkitRoundsOptions = Omit<GhostkitSimulateOptions, 'round'> & {

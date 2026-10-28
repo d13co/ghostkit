@@ -202,6 +202,11 @@ async function gkMapLimit(items, limit, fn) {
     await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
     return results;
 }
+/** Throws the signal's reason if it is aborted (`AbortSignal.throwIfAborted`, which older DOM typings lack). */
+function gkThrowIfAborted(signal) {
+    if (signal?.aborted)
+        throw signal.reason;
+}
 /** The validity window for a simulate at `round`: valid only in block round + 1, so `block` can look back the furthest. */
 const gkValidityAt = (round) => ({ firstValidRound: round + 1n, lastValidRound: round + 1n });
 /**
@@ -304,6 +309,7 @@ async function ghostkitDetectNode(algorand) {
 function ghostkitStockBackend(algorand, { concurrency = 8 } = {}) {
     const simulateOne = async (group, options, round) => {
         try {
+            gkThrowIfAborted(options.signal);
             const { protocol, ...raw } = options;
             if (protocol)
                 throw new Error(`protocol '${protocol}' needs a dtalgorand node`);
@@ -316,6 +322,8 @@ function ghostkitStockBackend(algorand, { concurrency = 8 } = {}) {
             };
         }
         catch (e) {
+            // an abort rejects the whole call, as on the other backends, rather than failing this group
+            gkThrowIfAborted(options.signal);
             return { ok: false, error: gkAsError(e) };
         }
     };
@@ -1191,6 +1199,8 @@ class GhostkitBase {
     async _gkRunOn(backend, calls, target, options, fallback) {
         const { validityWindow, protocol, round: _round, ...rest } = { ...options, ...calls[0]?.options };
         const raw = { extraOpcodeBudget: 170000, allowMoreLogging: true, allowUnnamedResources: true, ...rest };
+        // every backend, custom ones included, rejects an aborted call with the reason, before and after its requests
+        gkThrowIfAborted(rest.signal);
         // Ghosts are compiled for recent AVM versions (and maybe v42's larger programs), which older rounds' protocols
         // reject. On a dtalgorand node past rounds run under the latest protocol, a no-op at rounds already on it.
         const past = target.kind !== 'latest';
@@ -1234,6 +1244,7 @@ class GhostkitBase {
             const round = target.kind === 'round' ? target.round : undefined;
             rounds = [{ round: round ?? 0n, groups: await backend.simulate(groups, { ...request, round }) }];
         }
+        gkThrowIfAborted(rest.signal);
         const simEnd = debug ? performance.now() : 0;
         const structs = this.appSpec.structs;
         const results = rounds.map(({ round, groups: outcomes, protocolOverride }) => {
