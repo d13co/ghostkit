@@ -470,7 +470,7 @@ The dtalgorand forks are vendored in `vendor/` for now (`dtalgosdk-3.9.0-dt.3.0.
 - `npm run build`: compiles ghostkit and regenerates `examples/GhostofavmSDK.ts`.
 - `npm run check:example`: type-checks the example SDK and the tests against the fork of algokit-utils, and the example SDK against stock algokit-utils.
 - `npm test`: unit tests, offline, once with each algokit-utils.
-- `npm run test:live`: live tests, once with each algokit-utils. Set `ALGOD_SERVER` (e.g. `http://localhost:4001`, a LocalNet on consensus v42) and/or `DT_ALGOD_SERVER` (a MainNet dtalgorand node with time travel); tokens in `ALGOD_TOKEN` / `DT_ALGOD_TOKEN`. Run the dtalgorand suite against a node with queries and one without, to cover both queries and the simulate fallback; the query-only tests skip on a node without queries.
+- `npm run test:live`: live tests, once with each algokit-utils. Set `ALGOD_SERVER` (e.g. `http://localhost:4001`, a LocalNet on consensus v42) and/or `DT_ALGOD_SERVER` (a MainNet dtalgorand node with time travel); tokens in `ALGOD_TOKEN` / `DT_ALGOD_TOKEN`. Run the dtalgorand suite against a node with queries and one without, to cover both queries and the simulate fallback; the query-only tests, and the `ghostkitChangeRounds` tests with `key` and `boxPrefix` (which need a node built with versions filters), skip on a node without queries.
 
 The SDK's runtime is `src/templates/runtime.ts`, a regular module that ghostkit inlines into each generated SDK.
 

@@ -275,16 +275,11 @@ describe.skipIf(!dtServer)('dtalgorand node (MainNet)', () => {
       }
     })
 
+    // `key` and `boxPrefix` need a node built with versions filters: run these against the node with queries (the
+    // query build, e.g. 127.0.0.1:8081); they skip on a node without queries, like the query tests
     describe('with key and prefix filters', () => {
-      // a node without the filters ignores them, so this suite needs one that has them
-      let filters = false
-      beforeAll(async () => {
-        const page = await rest<{ versions: object[] }>(dtServer!, token, `/v2/applications/${REGISTRY}/versions?key=str:numV&limit=1`)
-        filters = page.versions.every((v) => 'key-value' in v)
-      })
-
       test('a global state key', async (ctx) => {
-        if (!fork || !filters) ctx.skip()
+        if (!fork || !hasQuery) ctx.skip()
         const { rounds, next } = await ghostkitChangeRounds(algorand, [{ app: REGISTRY, key: 'numV' }], { order: 'desc', maxRound: 66_000_000n, limit: 2 })
         expect({ rounds, next }).toEqual({ rounds: [65_770_003n, 65_687_419n], next: 65_687_418n })
         // numV changed in each of these rounds
@@ -300,7 +295,7 @@ describe.skipIf(!dtServer)('dtalgorand node (MainNet)', () => {
       })
 
       test('a box prefix', async (ctx) => {
-        if (!fork || !filters) ctx.skip()
+        if (!fork || !hasQuery) ctx.skip()
         const { rounds, next } = await ghostkitChangeRounds(algorand, [{ app: REGISTRY, boxPrefix: 'v' }], { maxRound: 66_000_000n, limit: 3 })
         expect({ rounds, next }).toEqual({ rounds: [46_519_818n, 46_519_867n, 46_520_427n], next: 46_520_428n })
       })
