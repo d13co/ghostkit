@@ -973,8 +973,11 @@ describe('ghostkitChangeRounds', () => {
         })()
       })
     }
-    const status = vi.spyOn(algorand.client.algod, 'status').mockReturnValue({ do: async () => ({ lastRound: 500n }) } as never)
-    return { algorand, calls, closed, status }
+    const statusOptions: unknown[] = []
+    const status = vi.spyOn(algorand.client.algod, 'status').mockReturnValue({
+      do: async (_headers?: unknown, options?: unknown) => (statusOptions.push(options), { lastRound: 500n }),
+    } as never)
+    return { algorand, calls, closed, status, statusOptions }
   }
   const ACCOUNT = READER
 
@@ -1050,6 +1053,10 @@ describe('ghostkitChangeRounds', () => {
     await ghostkitChangeRounds(two.algorand, [{ app: 1 }, { asset: 2 }])
     expect(two.status).toHaveBeenCalledTimes(1)
     expect(two.calls.map((c) => (c.args[1] as { maxRound?: bigint }).maxRound)).toEqual([500n, 500n])
+    // the read is the call's own, so its signal cancels it
+    const signal = new AbortController().signal
+    await ghostkitChangeRounds(two.algorand, [{ app: 1 }, { asset: 2 }], { signal })
+    expect(two.statusOptions).toEqual([undefined, { signal }])
   })
 
   test.runIf(forkUtils)("a listing's error rejects the call, and closes the others", async () => {

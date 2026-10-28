@@ -617,7 +617,7 @@ async function ghostkitChangeRounds(algorand, sources, { minRound, maxRound, ord
         return { rounds: [] };
     let last = maxRound !== undefined ? BigInt(maxRound) : undefined;
     if (last === undefined && sources.length > 1) {
-        last = (await algorand.client.algod.status().do()).lastRound;
+        last = (await algorand.client.algod.status().do(undefined, signal ? { signal } : undefined)).lastRound;
         gkThrowIfAborted(signal);
     }
     // the listings stop with the call: on the caller's abort, an error, or when enough rounds are taken
