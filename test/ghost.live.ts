@@ -8,7 +8,7 @@ import algosdk from 'algosdk'
 import { beforeAll, describe, expect, test } from 'vitest'
 import { GhostBigSDK } from './generated/GhostBigSDK'
 import { GhostChunkSDK } from './generated/GhostChunkSDK'
-import { GhostV11SDK, GhostkitError } from './generated/GhostV11SDK'
+import { GhostV11SDK, GhostkitError, ghostkitChangeRounds } from './generated/GhostV11SDK'
 import { GhostV13SDK } from './generated/GhostV13SDK'
 
 const DEFAULT_TOKEN = 'a'.repeat(64)
@@ -247,5 +247,63 @@ describe.skipIf(!dtServer)('dtalgorand node (MainNet)', () => {
     const accounts = randomAddresses(400)
     const balances = await chunked.atRound(MID).acctBalanceData({ methodArgsOrArgsArray: { accounts } })
     expect(balances.map((b) => b.address)).toEqual(accounts)
+  })
+
+  describe('change rounds', () => {
+    const feeSink = 'Y76M3MSY6DKBRHBL7C3NNDXGS5IIMQVQVUAB6MP4XEMMGVF2QWNPL226CA'
+    const USDC = 31_566_704n
+    // Reti's validator registry: `numV` counts validators, `v` + id boxes hold them
+    const REGISTRY = 2_714_516_089n
+
+    test('lists an asset and an account, merged once per round', async (ctx) => {
+      if (!fork) ctx.skip()
+      expect(await ghostkitChangeRounds(algorand, [{ asset: USDC }], { maxRound: 60_000_000n })).toEqual({ rounds: [8_874_561n] })
+      // the fee sink changes every round
+      const merged = await ghostkitChangeRounds(algorand, [{ asset: USDC }, { account: feeSink }], { minRound: 8_874_560n, maxRound: 8_874_562n })
+      expect(merged).toEqual({ rounds: [8_874_560n, 8_874_561n, 8_874_562n] })
+    })
+
+    test('the latest changes first, read by a ghost at each', async (ctx) => {
+      if (!fork) ctx.skip()
+      const { rounds, next } = await ghostkitChangeRounds(algorand, [{ account: feeSink }], { order: 'desc', maxRound: 60_000_000n, limit: 2 })
+      expect({ rounds, next }).toEqual({ rounds: [60_000_000n, 59_999_999n], next: 59_999_998n })
+      const results = await sdk.atRounds(rounds, (s) => s.acctBalanceData({ methodArgsOrArgsArray: { accounts: [feeSink] } }))
+      for (const r of results) {
+        if (!r.ok) throw r.error
+        const account = await rest<{ amount: number }>(dtServer!, token, `/v2/accounts/${feeSink}?round=${r.round}&exclude=all`)
+        expect(r.value[0].balance).toBe(BigInt(account.amount))
+      }
+    })
+
+    describe('with key and prefix filters', () => {
+      // a node without the filters ignores them, so this suite needs one that has them
+      let filters = false
+      beforeAll(async () => {
+        const page = await rest<{ versions: object[] }>(dtServer!, token, `/v2/applications/${REGISTRY}/versions?key=str:numV&limit=1`)
+        filters = page.versions.every((v) => 'key-value' in v)
+      })
+
+      test('a global state key', async (ctx) => {
+        if (!fork || !filters) ctx.skip()
+        const { rounds, next } = await ghostkitChangeRounds(algorand, [{ app: REGISTRY, key: 'numV' }], { order: 'desc', maxRound: 66_000_000n, limit: 2 })
+        expect({ rounds, next }).toEqual({ rounds: [65_770_003n, 65_687_419n], next: 65_687_418n })
+        // numV changed in each of these rounds
+        const numV = async (round: bigint) => {
+          const app = await rest<{ params: { 'global-state': { key: string; value: { uint: number } }[] } }>(
+            dtServer!,
+            token,
+            `/v2/applications/${REGISTRY}?round=${round}`,
+          )
+          return app.params['global-state'].find((kv) => kv.key === btoa('numV'))?.value.uint
+        }
+        for (const r of rounds) expect(await numV(r)).not.toBe(await numV(r - 1n))
+      })
+
+      test('a box prefix', async (ctx) => {
+        if (!fork || !filters) ctx.skip()
+        const { rounds, next } = await ghostkitChangeRounds(algorand, [{ app: REGISTRY, boxPrefix: 'v' }], { maxRound: 66_000_000n, limit: 3 })
+        expect({ rounds, next }).toEqual({ rounds: [46_519_818n, 46_519_867n, 46_520_427n], next: 46_520_428n })
+      })
+    })
   })
 })

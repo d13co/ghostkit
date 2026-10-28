@@ -1,6 +1,7 @@
 import type { AlgorandClient as GkAlgorandClient } from '@algorandfoundation/algokit-utils/types/algorand-client';
 import { type Arc56Contract as GkArc56Contract } from '@algorandfoundation/algokit-utils/types/app-arc56';
 import { TransactionComposer as GkTransactionComposer, type CommonAppCallParams as GkCommonAppCallParams, type RawSimulateOptions as GkRawSimulateOptions } from '@algorandfoundation/algokit-utils/types/composer';
+import * as gkAlgosdk from 'algosdk';
 /** A round number. */
 export type GhostkitRound = number | bigint;
 /** Extra app call parameters for each ghost call: fees, validity, note, lease, references. */
@@ -271,6 +272,110 @@ export declare function ghostkitQueryBackend(algorand: GkAlgorandClient, { limit
     limits?: GhostkitSimulateLimits;
     concurrency?: number;
 }): GhostkitBackend;
+/**
+ * What `ghostkitChangeRounds` lists the change rounds of. Keys, box names and prefixes given as strings are UTF-8, as
+ * box names are in algokit-utils.
+ */
+export type GhostkitChangeSource = 
+/** An app's params and global state; with `key`, only the rounds in which that global state key changed. */
+{
+    app: bigint | number;
+    key?: string | Uint8Array;
+    box?: never;
+    boxPrefix?: never;
+    asset?: never;
+    account?: never;
+}
+/** One of an app's boxes. */
+ | {
+    app: bigint | number;
+    box: string | Uint8Array;
+    key?: never;
+    boxPrefix?: never;
+    asset?: never;
+    account?: never;
+}
+/** An app's boxes whose names start with `boxPrefix`, such as one ARC-56 box map (`''` for all of its boxes). */
+ | {
+    app: bigint | number;
+    boxPrefix: string | Uint8Array;
+    key?: never;
+    box?: never;
+    asset?: never;
+    account?: never;
+}
+/** An asset's params. */
+ | {
+    asset: bigint | number;
+    app?: never;
+    account?: never;
+    key?: never;
+    box?: never;
+    boxPrefix?: never;
+}
+/** An account's base record: balance, status, minimum balance, ... (not its holdings or app states). */
+ | {
+    account: string | gkAlgosdk.Address;
+    asset?: never;
+    app?: never;
+    key?: never;
+    box?: never;
+    boxPrefix?: never;
+}
+/** One of an account's asset holdings. */
+ | {
+    account: string | gkAlgosdk.Address;
+    asset: bigint | number;
+    app?: never;
+    key?: never;
+    box?: never;
+    boxPrefix?: never;
+}
+/** An account's local state in one app; with `key`, only the rounds in which that local state key changed. */
+ | {
+    account: string | gkAlgosdk.Address;
+    app: bigint | number;
+    key?: string | Uint8Array;
+    asset?: never;
+    box?: never;
+    boxPrefix?: never;
+};
+/** Options of `ghostkitChangeRounds`. */
+export type GhostkitChangeRoundsOptions = {
+    /** The first round to list (inclusive); default 1. */
+    minRound?: GhostkitRound;
+    /** The last round to list (inclusive); default the latest. */
+    maxRound?: GhostkitRound;
+    /** `asc` (default) lists the earliest changes first, `desc` the latest first. The rounds come in this order. */
+    order?: 'asc' | 'desc';
+    /** At most this many rounds (default 1,000). */
+    limit?: number;
+    /** Stops the listing; the call rejects with the signal's reason. */
+    signal?: AbortSignal;
+};
+/**
+ * dtalgorand nodes only: the rounds in which any of `sources` changed, merged and deduplicated, from the node's
+ * `/versions` listings. Pass them to `atRounds` to read a ghost at every change and nowhere between, instead of
+ * sampling rounds evenly.
+ *
+ * - A round is the round of a change: a ghost read at it sees the state after the change (`round - 1n` sees it before).
+ * - Round 0 (genesis allocations) is never listed: to `atRounds`, 0 is the latest round.
+ * - `next` is set when `limit` cut the list: pass it as `minRound` (`asc`) or `maxRound` (`desc`) to continue. With
+ *   several sources and no `maxRound`, the latest round is read once, so every listing ends at the same round.
+ * - The node's versions errors pass through: a listing over the node's time limit (504) or a history it can't serve
+ *   (503) isn't retried, so narrow the range. Pages can be short or empty (`key`, `boxPrefix`); they are followed to the end.
+ *
+ * Needs the dtalgorand fork of algokit-utils (`algorand.dt`, `9.2.3-dt.3.0.0.1` or later) and algosdk (`3.9.0-dt.3.0.0.1`
+ * or later for `key` and `boxPrefix`).
+ *
+ * @example
+ * const { rounds } = await ghostkitChangeRounds(algorand, [{ app: poolAppId, box: 'stakers' }], { minRound, maxRound })
+ * const series = await sdk.atRounds(rounds, (s) => s.stakerBalances({ methodArgsOrArgsArray: { pool: poolAppId } }))
+ */
+export declare function ghostkitChangeRounds(algorand: GkAlgorandClient, sources: GhostkitChangeSource[], { minRound, maxRound, order, limit, signal }?: GhostkitChangeRoundsOptions): Promise<{
+    rounds: bigint[];
+    next?: bigint;
+}>;
 /** A call as the generated SDK method describes it. */
 type GkCallSpec = {
     signature: string;

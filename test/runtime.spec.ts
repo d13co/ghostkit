@@ -16,6 +16,7 @@ import {
   GhostV11SDK,
   ghostkitDetectNode,
   ghostkitQueryBackend,
+  ghostkitChangeRounds,
   ghostkitStockBackend,
 } from './generated/GhostV11SDK'
 import { GhostV13SDK } from './generated/GhostV13SDK'
@@ -932,5 +933,160 @@ describe('suggested params', () => {
     } finally {
       now.mockRestore()
     }
+  })
+})
+
+describe('ghostkitChangeRounds', () => {
+  const ITERATORS = [
+    'iterateAppVersions',
+    'iterateBoxVersions',
+    'iterateBoxesVersions',
+    'iterateAssetVersions',
+    'iterateAccountVersions',
+    'iterateAccountAssetVersions',
+    'iterateAccountAppVersions',
+  ] as const
+  type Iterator = (typeof ITERATORS)[number]
+  type Feed = bigint[] | ((options: { signal: AbortSignal }) => AsyncGenerator<{ round: bigint }>)
+
+  /** Fakes `algorand.dt`'s iterators: each lists its rounds in the order asked for, and records its calls and closes. */
+  function fakeFeeds(feeds: Partial<Record<Iterator, Feed>>) {
+    const algorand = offlineAlgorand()
+    const dt = (algorand as unknown as { dt: Record<Iterator, (...args: unknown[]) => AsyncGenerator<{ round: bigint }>> }).dt
+    const calls: { method: Iterator; args: unknown[] }[] = []
+    const closed: Iterator[] = []
+    for (const method of ITERATORS) {
+      vi.spyOn(dt, method).mockImplementation((...args: unknown[]) => {
+        calls.push({ method, args })
+        const options = args[args.length - 1] as { order: 'asc' | 'desc'; signal: AbortSignal }
+        const feed = feeds[method] ?? []
+        return (async function* () {
+          try {
+            if (typeof feed === 'function') yield* feed(options)
+            else {
+              const sorted = [...feed].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+              for (const round of options.order === 'desc' ? sorted.reverse() : sorted) yield { round }
+            }
+          } finally {
+            closed.push(method)
+          }
+        })()
+      })
+    }
+    const status = vi.spyOn(algorand.client.algod, 'status').mockReturnValue({ do: async () => ({ lastRound: 500n }) } as never)
+    return { algorand, calls, closed, status }
+  }
+  const ACCOUNT = READER
+
+  test.runIf(forkUtils)('lists each kind of source with the matching versions listing', async () => {
+    const { algorand, calls, status } = fakeFeeds({})
+    const key = new Uint8Array([1, 2])
+    await ghostkitChangeRounds(
+      algorand,
+      [
+        { app: 1 },
+        { app: 2n, key: 'numV' },
+        { app: 3, box: 'stakers' },
+        { app: 4, boxPrefix: 'v' },
+        { app: 5, boxPrefix: '' },
+        { asset: 6 },
+        { account: ACCOUNT },
+        { account: ACCOUNT, asset: 7 },
+        { account: ACCOUNT, app: 8, key },
+      ],
+      { minRound: 10, maxRound: 20n, limit: 5 },
+    )
+    expect(status).not.toHaveBeenCalled()
+    const signal = (calls[0].args[1] as { signal: AbortSignal }).signal
+    expect(signal).toBeInstanceOf(AbortSignal)
+    const o = { minRound: 10n, maxRound: 20n, order: 'asc', limit: 6, signal }
+    expect(calls).toEqual([
+      { method: 'iterateAppVersions', args: [1n, o] },
+      { method: 'iterateAppVersions', args: [2n, { ...o, key: 'numV' }] },
+      { method: 'iterateBoxVersions', args: [3n, 'stakers', o] },
+      { method: 'iterateBoxesVersions', args: [4n, { ...o, prefix: 'v' }] },
+      { method: 'iterateBoxesVersions', args: [5n, o] },
+      { method: 'iterateAssetVersions', args: [6n, o] },
+      { method: 'iterateAccountVersions', args: [ACCOUNT, { ...o, exclude: ['all'] }] },
+      { method: 'iterateAccountAssetVersions', args: [ACCOUNT, 7n, o] },
+      { method: 'iterateAccountAppVersions', args: [ACCOUNT, 8n, { ...o, key }] },
+    ])
+    await ghostkitChangeRounds(algorand, [{ app: 1 }], { limit: 5_000 })
+    expect(calls[calls.length - 1].args[1]).toMatchObject({ limit: 1_000 })
+    expect(calls[calls.length - 1].args[1]).not.toHaveProperty('maxRound')
+  })
+
+  test.runIf(forkUtils)('merges the sources in order, once per round, without round 0', async () => {
+    const feeds = { iterateAppVersions: [0n, 3n, 3n, 5n, 1n], iterateBoxVersions: [2n, 3n, 6n], iterateAssetVersions: [5n, 7n] }
+    const sources = [{ app: 1 }, { app: 1, box: 'b' }, { asset: 2 }]
+    const asc = fakeFeeds(feeds)
+    expect(await ghostkitChangeRounds(asc.algorand, sources)).toEqual({ rounds: [1n, 2n, 3n, 5n, 6n, 7n] })
+    const desc = fakeFeeds(feeds)
+    expect(await ghostkitChangeRounds(desc.algorand, sources, { order: 'desc' })).toEqual({ rounds: [7n, 6n, 5n, 3n, 2n, 1n] })
+    expect(desc.calls[0].args[1]).toMatchObject({ order: 'desc', maxRound: 500n })
+  })
+
+  test.runIf(forkUtils)('stops at limit with where to continue, and closes every listing', async () => {
+    const feeds = { iterateAppVersions: [1n, 4n, 9n], iterateAssetVersions: [2n, 4n, 8n] }
+    const sources = [{ app: 1 }, { asset: 2 }]
+    const asc = fakeFeeds(feeds)
+    expect(await ghostkitChangeRounds(asc.algorand, sources, { limit: 3 })).toEqual({ rounds: [1n, 2n, 4n], next: 5n })
+    expect(asc.closed.sort()).toEqual(['iterateAppVersions', 'iterateAssetVersions'])
+    const desc = fakeFeeds(feeds)
+    expect(await ghostkitChangeRounds(desc.algorand, sources, { limit: 2, order: 'desc' })).toEqual({ rounds: [9n, 8n], next: 7n })
+    expect(desc.closed).toHaveLength(2)
+    // no `next` when the listings end at the limit
+    const exact = fakeFeeds(feeds)
+    expect(await ghostkitChangeRounds(exact.algorand, sources, { limit: 5 })).toEqual({ rounds: [1n, 2n, 4n, 8n, 9n] })
+  })
+
+  test.runIf(forkUtils)('reads the latest round once for several sources without maxRound', async () => {
+    const one = fakeFeeds({ iterateAppVersions: [1n] })
+    await ghostkitChangeRounds(one.algorand, [{ app: 1 }])
+    await ghostkitChangeRounds(one.algorand, [{ app: 1 }, { asset: 2 }], { maxRound: 9 })
+    expect(one.status).not.toHaveBeenCalled()
+    expect(one.calls.slice(1).map((c) => (c.args[1] as { maxRound?: bigint }).maxRound)).toEqual([9n, 9n])
+    const two = fakeFeeds({ iterateAppVersions: [1n] })
+    await ghostkitChangeRounds(two.algorand, [{ app: 1 }, { asset: 2 }])
+    expect(two.status).toHaveBeenCalledTimes(1)
+    expect(two.calls.map((c) => (c.args[1] as { maxRound?: bigint }).maxRound)).toEqual([500n, 500n])
+  })
+
+  test.runIf(forkUtils)("a listing's error rejects the call, and closes the others", async () => {
+    const { algorand, closed } = fakeFeeds({
+      iterateAppVersions: [1n, 2n, 3n],
+      iterateAssetVersions: async function* () {
+        yield { round: 1n }
+        throw Object.assign(new Error('versions listing ran over the time limit'), { status: 504 })
+      },
+    })
+    await expect(ghostkitChangeRounds(algorand, [{ app: 1 }, { asset: 2 }])).rejects.toMatchObject({ status: 504 })
+    expect(closed.sort()).toEqual(['iterateAppVersions', 'iterateAssetVersions'])
+  })
+
+  test.runIf(forkUtils)('an abort rejects with the reason, and cancels the listings', async () => {
+    const aborted = new AbortController()
+    aborted.abort()
+    const before = fakeFeeds({ iterateAppVersions: [1n] })
+    await expect(ghostkitChangeRounds(before.algorand, [{ app: 1 }], { signal: aborted.signal })).rejects.toBe(aborted.signal.reason)
+    expect(before.calls).toHaveLength(0)
+
+    const controller = new AbortController()
+    let cancelled: unknown
+    const during = fakeFeeds({
+      iterateAppVersions: async function* ({ signal }) {
+        yield { round: 1n }
+        controller.abort(new Error('navigated away'))
+        await new Promise((resolve) => setTimeout(resolve, 0))
+        cancelled = signal.aborted && signal.reason
+        signal.throwIfAborted()
+      },
+    })
+    await expect(ghostkitChangeRounds(during.algorand, [{ app: 1 }], { signal: controller.signal })).rejects.toThrow('navigated away')
+    expect(cancelled).toMatchObject({ message: 'navigated away' })
+  })
+
+  test.runIf(!forkUtils)('needs the fork of algokit-utils', async () => {
+    await expect(ghostkitChangeRounds(offlineAlgorand(), [{ app: 1 }])).rejects.toThrow(/need the dtalgorand fork of algokit-utils/)
   })
 })

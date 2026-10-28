@@ -2023,6 +2023,181 @@ export function ghostkitQueryBackend(
   }
 }
 
+/**
+ * What `ghostkitChangeRounds` lists the change rounds of. Keys, box names and prefixes given as strings are UTF-8, as
+ * box names are in algokit-utils.
+ */
+export type GhostkitChangeSource =
+  /** An app's params and global state; with `key`, only the rounds in which that global state key changed. */
+  | { app: bigint | number; key?: string | Uint8Array; box?: never; boxPrefix?: never; asset?: never; account?: never }
+  /** One of an app's boxes. */
+  | { app: bigint | number; box: string | Uint8Array; key?: never; boxPrefix?: never; asset?: never; account?: never }
+  /** An app's boxes whose names start with `boxPrefix`, such as one ARC-56 box map (`''` for all of its boxes). */
+  | { app: bigint | number; boxPrefix: string | Uint8Array; key?: never; box?: never; asset?: never; account?: never }
+  /** An asset's params. */
+  | { asset: bigint | number; app?: never; account?: never; key?: never; box?: never; boxPrefix?: never }
+  /** An account's base record: balance, status, minimum balance, ... (not its holdings or app states). */
+  | { account: string | gkAlgosdk.Address; asset?: never; app?: never; key?: never; box?: never; boxPrefix?: never }
+  /** One of an account's asset holdings. */
+  | { account: string | gkAlgosdk.Address; asset: bigint | number; app?: never; key?: never; box?: never; boxPrefix?: never }
+  /** An account's local state in one app; with `key`, only the rounds in which that local state key changed. */
+  | { account: string | gkAlgosdk.Address; app: bigint | number; key?: string | Uint8Array; asset?: never; box?: never; boxPrefix?: never }
+
+/** Options of `ghostkitChangeRounds`. */
+export type GhostkitChangeRoundsOptions = {
+  /** The first round to list (inclusive); default 1. */
+  minRound?: GhostkitRound
+  /** The last round to list (inclusive); default the latest. */
+  maxRound?: GhostkitRound
+  /** `asc` (default) lists the earliest changes first, `desc` the latest first. The rounds come in this order. */
+  order?: 'asc' | 'desc'
+  /** At most this many rounds (default 1,000). */
+  limit?: number
+  /** Stops the listing; the call rejects with the signal's reason. */
+  signal?: AbortSignal
+}
+
+/** The versions listings of the dtalgorand fork of algokit-utils (`algorand.dt`), as far as ghostkit uses them. */
+type GkVersionsFeed = AsyncGenerator<{ round: bigint }, unknown, unknown>
+type GkVersionsOptions = { minRound?: bigint; maxRound?: bigint; order: 'asc' | 'desc'; limit: number; signal: AbortSignal }
+type GkDTManager = {
+  iterateAppVersions(appId: bigint, options: GkVersionsOptions & { key?: string | Uint8Array }): GkVersionsFeed
+  iterateBoxVersions(appId: bigint, name: string | Uint8Array, options: GkVersionsOptions): GkVersionsFeed
+  iterateBoxesVersions(appId: bigint, options: GkVersionsOptions & { prefix?: string | Uint8Array }): GkVersionsFeed
+  iterateAssetVersions(assetId: bigint, options: GkVersionsOptions): GkVersionsFeed
+  iterateAccountVersions(address: string | gkAlgosdk.Address, options: GkVersionsOptions & { exclude: string[] }): GkVersionsFeed
+  iterateAccountAssetVersions(address: string | gkAlgosdk.Address, assetId: bigint, options: GkVersionsOptions): GkVersionsFeed
+  iterateAccountAppVersions(
+    address: string | gkAlgosdk.Address,
+    appId: bigint,
+    options: GkVersionsOptions & { key?: string | Uint8Array },
+  ): GkVersionsFeed
+}
+
+const GK_DT_ITERATORS = [
+  'iterateAppVersions',
+  'iterateBoxVersions',
+  'iterateBoxesVersions',
+  'iterateAssetVersions',
+  'iterateAccountVersions',
+  'iterateAccountAssetVersions',
+  'iterateAccountAppVersions',
+] as const
+
+const gkDTManager = (algorand: GkAlgorandClient): GkDTManager | undefined => {
+  const manager = (algorand as unknown as { dt?: Partial<GkDTManager> }).dt
+  return manager && GK_DT_ITERATORS.every((m) => typeof manager[m] === 'function') ? (manager as GkDTManager) : undefined
+}
+
+/** The versions listing of one change source. */
+function gkChangeFeed(dt: GkDTManager, source: GhostkitChangeSource, options: GkVersionsOptions): GkVersionsFeed {
+  const s = source as { app?: bigint | number; asset?: bigint | number; account?: string | gkAlgosdk.Address } & {
+    key?: string | Uint8Array
+    box?: string | Uint8Array
+    boxPrefix?: string | Uint8Array
+  }
+  const key = s.key !== undefined ? { key: s.key } : {}
+  if (s.account !== undefined) {
+    if (s.asset !== undefined) return dt.iterateAccountAssetVersions(s.account, BigInt(s.asset), options)
+    if (s.app !== undefined) return dt.iterateAccountAppVersions(s.account, BigInt(s.app), { ...options, ...key })
+    return dt.iterateAccountVersions(s.account, { ...options, exclude: ['all'] })
+  }
+  if (s.asset !== undefined) return dt.iterateAssetVersions(BigInt(s.asset), options)
+  if (s.app !== undefined) {
+    if (s.box !== undefined) return dt.iterateBoxVersions(BigInt(s.app), s.box, options)
+    if (s.boxPrefix !== undefined) {
+      return dt.iterateBoxesVersions(BigInt(s.app), { ...options, ...(s.boxPrefix.length ? { prefix: s.boxPrefix } : {}) })
+    }
+    return dt.iterateAppVersions(BigInt(s.app), { ...options, ...key })
+  }
+  throw new Error('ghostkit: a change source needs an app, an asset or an account')
+}
+
+/**
+ * dtalgorand nodes only: the rounds in which any of `sources` changed, merged and deduplicated, from the node's
+ * `/versions` listings. Pass them to `atRounds` to read a ghost at every change and nowhere between, instead of
+ * sampling rounds evenly.
+ *
+ * - A round is the round of a change: a ghost read at it sees the state after the change (`round - 1n` sees it before).
+ * - Round 0 (genesis allocations) is never listed: to `atRounds`, 0 is the latest round.
+ * - `next` is set when `limit` cut the list: pass it as `minRound` (`asc`) or `maxRound` (`desc`) to continue. With
+ *   several sources and no `maxRound`, the latest round is read once, so every listing ends at the same round.
+ * - The node's versions errors pass through: a listing over the node's time limit (504) or a history it can't serve
+ *   (503) isn't retried, so narrow the range. Pages can be short or empty (`key`, `boxPrefix`); they are followed to the end.
+ *
+ * Needs the dtalgorand fork of algokit-utils (`algorand.dt`, `9.2.3-dt.3.0.0.1` or later) and algosdk (`3.9.0-dt.3.0.0.1`
+ * or later for `key` and `boxPrefix`).
+ *
+ * @example
+ * const { rounds } = await ghostkitChangeRounds(algorand, [{ app: poolAppId, box: 'stakers' }], { minRound, maxRound })
+ * const series = await sdk.atRounds(rounds, (s) => s.stakerBalances({ methodArgsOrArgsArray: { pool: poolAppId } }))
+ */
+export async function ghostkitChangeRounds(
+  algorand: GkAlgorandClient,
+  sources: GhostkitChangeSource[],
+  { minRound, maxRound, order = 'asc', limit = 1_000, signal }: GhostkitChangeRoundsOptions = {},
+): Promise<{ rounds: bigint[]; next?: bigint }> {
+  const dt = gkDTManager(algorand)
+  if (!dt) throw new Error('ghostkit: change rounds need the dtalgorand fork of algokit-utils (algorand.dt)')
+  if (!Number.isInteger(limit) || limit < 1) throw new Error(`ghostkit: limit must be a positive integer, not ${limit}`)
+  if (order !== 'asc' && order !== 'desc') throw new Error(`ghostkit: order must be 'asc' or 'desc', not ${order}`)
+  gkThrowIfAborted(signal)
+  if (sources.length === 0) return { rounds: [] }
+  let last = maxRound !== undefined ? BigInt(maxRound) : undefined
+  if (last === undefined && sources.length > 1) {
+    last = (await algorand.client.algod.status().do()).lastRound
+    gkThrowIfAborted(signal)
+  }
+
+  // the listings stop with the call: on the caller's abort, an error, or when enough rounds are taken
+  const stop = new AbortController()
+  const onAbort = () => stop.abort(signal!.reason)
+  signal?.addEventListener('abort', onAbort)
+  const desc = order === 'desc'
+  const options: GkVersionsOptions = {
+    ...(minRound !== undefined ? { minRound: BigInt(minRound) } : {}),
+    ...(last !== undefined ? { maxRound: last } : {}),
+    order,
+    limit: Math.min(limit + 1, 1_000),
+    signal: stop.signal,
+  }
+  const feeds: GkVersionsFeed[] = []
+  try {
+    for (const source of sources) feeds.push(gkChangeFeed(dt, source, options))
+    const heads: (bigint | undefined)[] = feeds.map(() => undefined)
+    /** Moves feed `i` to its next round other than 0, or to its end (`undefined`). */
+    const pull = async (i: number) => {
+      for (;;) {
+        const r = await feeds[i].next()
+        if (r.done) return void (heads[i] = undefined)
+        if (r.value.round !== 0n) return void (heads[i] = r.value.round)
+      }
+    }
+    await Promise.all(feeds.map((_, i) => pull(i)))
+    const rounds: bigint[] = []
+    for (;;) {
+      let best: bigint | undefined
+      for (const h of heads) if (h !== undefined && (best === undefined || (desc ? h > best : h < best))) best = h
+      if (best === undefined) return { rounds }
+      if (rounds.length === limit) {
+        const end = rounds[rounds.length - 1]
+        return { rounds, next: desc ? end - 1n : end + 1n }
+      }
+      rounds.push(best)
+      // every feed at this round moves past it, so a round listed by several feeds, or twice by one, is taken once
+      await Promise.all(
+        heads.map(async (_, i) => {
+          while (heads[i] === best) await pull(i)
+        }),
+      )
+    }
+  } finally {
+    signal?.removeEventListener('abort', onAbort)
+    if (!stop.signal.aborted) stop.abort(new Error('ghostkit: change rounds done'))
+    await Promise.allSettled(feeds.map((f) => f.return(undefined)))
+  }
+}
+
 /** Decodes a transaction's logs: every log but the last, which must be the ABI return. */
 function gkDecodeLogs<T>(logs: Uint8Array[][], returnType: string, structs: GkArc56Contract['structs']): T[] {
   return logs.flatMap((txnLogs, i) => {

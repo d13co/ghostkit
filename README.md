@@ -209,6 +209,32 @@ A stock node can only simulate its last few rounds (usually 4). A dtalgorand nod
 
 Older rounds ran older protocols, which reject recent AVM versions: the example ghost is AVM 11, and MainNet round 40,000,000 only allowed up to AVM 10. On a dtalgorand node past rounds therefore run under the latest protocol by default (queries too), as if it took effect right after the round. This changes nothing at rounds that already ran it. Each round's result has a `protocolOverride` that says whether it applied, with notes on any data the old round never produced. Pass `protocol: null` to simulate each round under its own protocol, or a protocol name (`v24`..`v42`, `latest`) for another.
 
+#### Rounds where things changed
+
+On a dtalgorand node, `ghostkitChangeRounds(algorand, sources, options?)` (exported by every generated SDK) lists the rounds in which any of `sources` changed, from the node's `/versions` listings, merged and deduplicated. Pass them to `atRounds` to read a ghost at every change and nowhere between, instead of sampling rounds evenly:
+
+```typescript
+import { ghostkitChangeRounds } from './GhostofavmSDK'
+
+const { rounds, next } = await ghostkitChangeRounds(algorand, [{ app: poolAppId, box: 'stakers' }], { minRound, maxRound })
+const series = await ghostSDK.atRounds(rounds, (s) => s.stakerBalances({ methodArgsOrArgsArray: { pool: poolAppId } }))
+```
+
+Sources:
+
+- `{ app }`: the app's params and global state; `{ app, key }`: only the rounds in which that global state key changed;
+- `{ app, box }`: one box; `{ app, boxPrefix }`: the boxes whose names start with the prefix, such as one ARC-56 box map (`''` for all);
+- `{ asset }`: the asset's params;
+- `{ account }`: the account's base record (balance, status, ...), not its holdings or app states; `{ account, asset }`: one holding; `{ account, app }`: its local state in the app, with `key` for one local key.
+
+Keys, box names and prefixes given as strings are UTF-8. Options: `minRound`, `maxRound` (inclusive), `order` (`'asc'`, the default, lists the earliest changes first; `'desc'` the latest), `limit` (default 1,000 rounds) and `signal`. When `limit` cuts the list, `next` says where to continue: pass it as `minRound` (`asc`) or `maxRound` (`desc`). With several sources and no `maxRound`, the latest round is read once so every listing ends at the same round.
+
+- A listed round is the round of a change: a ghost read at it sees the state after the change. Pass `round - 1n` to see the state before.
+- Round 0 (genesis allocations) is never listed: to `atRounds`, 0 means the latest round.
+- `key` and `boxPrefix` filter on the node, which examines a bounded number of versions per page, so pages can be short or empty; they are followed to the end.
+- The node's versions errors pass through and aren't retried: a listing that runs over the node's time limit (504) or a history it can't serve (503). Narrow the range.
+- It needs the dtalgorand forks: algokit-utils `9.2.3-dt.3.0.0.1` or later (`algorand.dt`; with stock algokit-utils it throws) and algosdk `3.9.0-dt.3.0.0.1` or later for `key` and `boxPrefix`.
+
 ### Batching calls
 
 `batch(fn)` simulates the calls `fn` makes together, and returns their results. On a dtalgorand node they go in one request (or as few as its limits allow; with queries, up to 1,024 app calls per request by default); on a stock node, one request per call, concurrently. It rejects with the first failed call's error:
