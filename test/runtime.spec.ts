@@ -587,6 +587,29 @@ describe('with a stub node', () => {
       expect(calls.slice(2).map((c) => c.groups[0][0].fee)).toEqual([800_000n, 59_800_000n])
     })
 
+    test.runIf(forkUtils)("falls back to the latest balance at once when the node doesn't serve the round's history", async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      try {
+        routes[`/v2/accounts/${READER}`] = (query) =>
+          query.get('round') !== null
+            ? { status: 503, body: { message: 'the time travel history is not served' } }
+            : { status: 200, body: { address: READER, round: 999, amount: 10_000_000, 'min-balance': 100_000 } }
+        const { sdk, calls } = sdkOn(GhostV11SDK, fakeBackend({ name: 'dt', limits: GHOSTKIT_DT_DEFAULT_LIMITS }))
+        const start = performance.now()
+        await sdk.atRound(5).acctBalanceData({ methodArgsOrArgsArray: { accounts } })
+        // the fork of algokit-utils throws a history-unavailable 503 at once, rather than retrying it for seconds
+        expect(performance.now() - start).toBeLessThan(1_000)
+        expect(requests.filter((r) => r.startsWith('/v2/accounts'))).toEqual([
+          `/v2/accounts/${READER}?exclude=all&round=5`,
+          `/v2/accounts/${READER}?exclude=all`,
+        ])
+        expect(calls[0].groups[0][0].fee).toBe(9_800_000n)
+        expect(warn.mock.calls.filter(([m]) => /couldn't read the reader's balance at past rounds/.test(String(m)))).toHaveLength(1)
+      } finally {
+        warn.mockRestore()
+      }
+    })
+
     test("pays the minimum fee when the reader can't pay more, or its balance can't be read", async () => {
       reader({ latest: [100_500, 100_000] })
       const { sdk, calls } = sdkOn(GhostV11SDK)

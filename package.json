@@ -37,8 +37,8 @@
     "vitest": "^4.1.11"
   },
   "dependencies": {
-    "@algorandfoundation/algokit-utils": "file:vendor/d13co-dt-algokit-utils-9.2.3-dt.2.0.1.0.tgz",
-    "algosdk": "file:vendor/dtalgosdk-3.9.0-dt.2.0.1.0.tgz",
+    "@algorandfoundation/algokit-utils": "file:vendor/d13co-dt-algokit-utils-9.2.3-dt.3.0.0.1.tgz",
+    "algosdk": "file:vendor/dtalgosdk-3.9.0-dt.3.0.0.1.tgz",
     "change-case": "^5.4.4"
   }
 }
