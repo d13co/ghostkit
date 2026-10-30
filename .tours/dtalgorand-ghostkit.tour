@@ -13,13 +13,13 @@
       "title": "Vendored forks",
       "file": "package.json",
       "line": 39,
-      "description": "## Dependencies\n\nThe dtalgorand forks of algokit-utils (`@d13co/dt-algokit-utils` `9.2.3-dt.4.0.0.1`) and algosdk (`dtalgosdk` `3.9.0-dt.4.0.0.1`) are vendored as tarballs in `vendor/` until they're published, installed under the stock names. Ghostkit supports only the current dtalgorand release, and these are its forks.\n\nStock algokit-utils 9.2.2 is installed alongside as `algokit-utils-stock`, so every suite runs against both (see the vitest config later). There is one algosdk copy, the fork, which is a superset of stock."
+      "description": "## Dependencies\n\nThe dtalgorand forks of algokit-utils (`@d13co/dt-algokit-utils` `9.2.3-dt.4.1.0.0`) and algosdk (`dtalgosdk` `3.9.0-dt.4.1.0.0`) are vendored as tarballs in `vendor/` until they're published, installed under the stock names. Ghostkit supports only the current dtalgorand release, and these are its forks.\n\nStock algokit-utils 9.2.2 is installed alongside as `algokit-utils-stock`, so every suite runs against both (see the vitest config later). There is one algosdk copy, the fork, which is a superset of stock."
     },
     {
       "title": "legacy-peer-deps",
       "file": ".npmrc",
       "line": 2,
-      "description": "Prerelease versions like `3.9.0-dt.4.0.0.1` never satisfy `^x.y.z` peer ranges, and npm's resolver crashes on `file:` overrides of direct dependencies. `legacy-peer-deps` installs the forks as they are. `.npmrc` was removed from `.gitignore` for this.\n\nProjects that use the forks hit the same issue: the README says to use this setting or pnpm overrides."
+      "description": "Prerelease versions like `3.9.0-dt.4.1.0.0` never satisfy `^x.y.z` peer ranges, and npm's resolver crashes on `file:` overrides of direct dependencies. `legacy-peer-deps` installs the forks as they are. `.npmrc` was removed from `.gitignore` for this.\n\nProjects that use the forks hit the same issue: the README says to use this setting or pnpm overrides."
     },
     {
       "title": "Scripts",

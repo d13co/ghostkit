@@ -461,11 +461,11 @@ To install ghostkit on your own project, you must currently use the alpha channe
 npm i ghostkit@alpha
 ```
 
-To use the dtalgorand forks in your project, install them in place of `@algorandfoundation/algokit-utils` and `algosdk` so that your project loads one copy of each: `@d13co/dt-algokit-utils` `9.2.3-dt.4.0.0.1` and `dtalgosdk` `3.9.0-dt.4.0.0.1`, aliased to the stock names, e.g. `"@algorandfoundation/algokit-utils": "file:vendor/d13co-dt-algokit-utils-9.2.3-dt.4.0.0.1.tgz"` and `"algosdk": "file:vendor/dtalgosdk-3.9.0-dt.4.0.0.1.tgz"`. Ghostkit supports the current dtalgorand release only, not nodes or forks of earlier ones. Their versions are prereleases, which no `^x.y.z` peer range accepts, so with npm set `legacy-peer-deps=true` in `.npmrc`, or use pnpm `overrides`.
+To use the dtalgorand forks in your project, install them in place of `@algorandfoundation/algokit-utils` and `algosdk` so that your project loads one copy of each: `@d13co/dt-algokit-utils` `9.2.3-dt.4.1.0.0` and `dtalgosdk` `3.9.0-dt.4.1.0.0`, aliased to the stock names, e.g. `"@algorandfoundation/algokit-utils": "file:vendor/d13co-dt-algokit-utils-9.2.3-dt.4.1.0.0.tgz"` and `"algosdk": "file:vendor/dtalgosdk-3.9.0-dt.4.1.0.0.tgz"`. Ghostkit supports the current dtalgorand release only, not nodes or forks of earlier ones. Their versions are prereleases, which no `^x.y.z` peer range accepts, so with npm set `legacy-peer-deps=true` in `.npmrc`, or use pnpm `overrides`.
 
 ### Development
 
-The dtalgorand forks are vendored in `vendor/` for now (`dtalgosdk-3.9.0-dt.4.0.0.1.tgz`, `d13co-dt-algokit-utils-9.2.3-dt.4.0.0.1.tgz`), which is why `.npmrc` sets `legacy-peer-deps`.
+The dtalgorand forks are vendored in `vendor/` for now (`dtalgosdk-3.9.0-dt.4.1.0.0.tgz`, `d13co-dt-algokit-utils-9.2.3-dt.4.1.0.0.tgz`), which is why `.npmrc` sets `legacy-peer-deps`.
 
 - `npm run build`: compiles ghostkit and regenerates `examples/GhostofavmSDK.ts`.
 - `npm run check:example`: type-checks the example SDK and the tests against the fork of algokit-utils, and the example SDK against stock algokit-utils.
