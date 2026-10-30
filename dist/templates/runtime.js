@@ -160,7 +160,7 @@ const gkEmptySigner = gkAlgosdk.makeEmptyTransactionSigner();
  */
 const gkDTAlgod = () => {
     const dt = gkAlgosdk.DTAlgodClient;
-    return dt?.features?.includes('simulate-limits') ? dt : undefined;
+    return dt?.features?.includes('capabilities') ? dt : undefined;
 };
 /** The fork of algokit-utils' managers if the loaded algokit-utils is the fork (it adds `algorand.simulate`), else undefined. */
 const gkForkUtils = (algorand) => {
@@ -211,26 +211,26 @@ function gkThrowIfAborted(signal) {
 /** The validity window for a simulate at `round`: valid only in block round + 1, so `block` can look back the furthest. */
 const gkValidityAt = (round) => ({ firstValidRound: round + 1n, lastValidRound: round + 1n });
 /**
- * A dtalgorand node's limits, or `undefined` for stock algod, the only node without them. They come from
- * `DTAlgodClient.simulateLimits()`, which caches them per algod client and is what the fork of algokit-utils reads
- * before each extended simulate and query, so the node is asked once.
+ * A dtalgorand node's limits, or `undefined` for stock algod, the only node without them. They come from the node's
+ * capabilities (`DTAlgodClient.capabilities()`), which dtalgosdk caches per algod client and the fork of algokit-utils
+ * reads before each extended simulate and query, so the node is asked once.
  */
 async function gkFetchLimits(algorand) {
     const dt = gkDTAlgod();
     if (!dt)
         return undefined;
-    const limits = await dt.from(algorand.client.algod).simulateLimits();
-    if (!limits.reported)
+    const caps = await dt.from(algorand.client.algod).capabilities();
+    if (!caps.reported)
         return undefined;
-    const q = limits.query;
+    const q = caps.query;
     return {
         simulate: {
-            maxTxnGroups: limits.maxTxnGroups,
-            maxRounds: limits.maxRounds,
-            maxExtraOpcodeBudget: limits.maxExtraOpcodeBudget,
-            resourceLimitMultiplier: limits.resourceLimitMultiplier,
-            timeTravel: limits.timeTravel,
-            developerApi: limits.developerApi,
+            maxTxnGroups: caps.simulate.maxTxnGroups,
+            maxRounds: caps.simulate.maxRounds,
+            maxExtraOpcodeBudget: caps.simulate.maxExtraOpcodeBudget,
+            resourceLimitMultiplier: caps.simulate.resourceLimitMultiplier,
+            timeTravel: caps.timeTravel,
+            developerApi: caps.developerApi,
         },
         ...(q
             ? {
@@ -256,9 +256,9 @@ function gkMissingForks(algorand) {
 }
 /**
  * Finds out whether ghost calls can use dtalgorand's queries or extended simulate: the loaded algokit-utils and algosdk
- * must be the dtalgorand forks, and the node must report its simulate limits (`GET /v2/transactions/simulate/limits`),
- * which every dtalgorand node does and stock algod doesn't. The limits also say which of the node's optional features
- * are on: queries (`query`), several rounds per simulate (`maxRounds`) and time travel (`timeTravel`).
+ * must be the dtalgorand forks, and the node must report its capabilities (`GET /v2/capabilities`), which every
+ * dtalgorand node does and stock algod doesn't. They also say which of the node's optional features are on: queries
+ * (`query`), several rounds per simulate (`simulate.maxRounds`) and time travel (`timeTravel`).
  */
 async function ghostkitDetectNode(algorand) {
     const stock = (reason) => ({ kind: 'stock', limits: exports.GHOSTKIT_STOCK_LIMITS, reason });
@@ -267,7 +267,7 @@ async function ghostkitDetectNode(algorand) {
         return stock(missing);
     const limits = await gkFetchLimits(algorand);
     if (!limits)
-        return stock('the node is stock algod (it has no simulate limits)');
+        return stock('the node is stock algod (it reports no capabilities)');
     return { kind: 'dt', limits: limits.simulate, ...(limits.query ? { query: limits.query } : {}) };
 }
 /** One simulate request per group, as any algod takes them. */

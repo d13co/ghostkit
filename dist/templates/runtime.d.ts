@@ -62,7 +62,7 @@ export type GhostkitMethodInput<TArgs> = {
     /** Split an array argument across app calls and groups (see `GhostkitChunkOptions`); `false` turns off the method's default. */
     chunk?: GhostkitChunkOptions | false;
 };
-/** The simulate limits of a node. */
+/** The simulate limits of a node, and whether it has time travel and the developer API. */
 export type GhostkitSimulateLimits = {
     /** Most groups per simulate request. */
     maxTxnGroups: number;
@@ -245,9 +245,9 @@ type GkAwaitedAll<T> = T extends readonly unknown[] ? {
 } : Awaited<T>;
 /**
  * Finds out whether ghost calls can use dtalgorand's queries or extended simulate: the loaded algokit-utils and algosdk
- * must be the dtalgorand forks, and the node must report its simulate limits (`GET /v2/transactions/simulate/limits`),
- * which every dtalgorand node does and stock algod doesn't. The limits also say which of the node's optional features
- * are on: queries (`query`), several rounds per simulate (`maxRounds`) and time travel (`timeTravel`).
+ * must be the dtalgorand forks, and the node must report its capabilities (`GET /v2/capabilities`), which every
+ * dtalgorand node does and stock algod doesn't. They also say which of the node's optional features are on: queries
+ * (`query`), several rounds per simulate (`simulate.maxRounds`) and time travel (`timeTravel`).
  */
 export declare function ghostkitDetectNode(algorand: GkAlgorandClient): Promise<GhostkitNode>;
 /** One simulate request per group, as any algod takes them. */

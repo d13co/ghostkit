@@ -85,7 +85,7 @@ export type GhostkitMethodInput<TArgs> = {
   chunk?: GhostkitChunkOptions | false
 }
 
-/** The simulate limits of a node. */
+/** The simulate limits of a node, and whether it has time travel and the developer API. */
 export type GhostkitSimulateLimits = {
   /** Most groups per simulate request. */
   maxTxnGroups: number
@@ -406,14 +406,20 @@ type GkQueryManager = {
 type GkDTAlgodClass = {
   features: readonly string[]
   from(algod: unknown): {
-    simulateLimits(): Promise<GkReportedLimits>
+    capabilities(): Promise<GkCapabilities>
     accountInformation(address: string): { exclude(exclude: 'all'): { round(round: bigint): { do(): Promise<GkAccountBalance> } } }
   }
 }
 /** The balance fields of an algosdk `Account`. */
 type GkAccountBalance = { amount: bigint; minBalance: bigint }
-/** What `DTAlgodClient.simulateLimits()` returns, as far as ghostkit uses it. */
-type GkReportedLimits = GhostkitSimulateLimits & { reported: boolean; query?: GhostkitQueryLimits }
+/** What `DTAlgodClient.capabilities()` returns, as far as ghostkit uses it: `reported` is false for stock algod. */
+type GkCapabilities = {
+  reported: boolean
+  timeTravel: boolean
+  developerApi: boolean
+  simulate: Pick<GhostkitSimulateLimits, 'maxTxnGroups' | 'maxRounds' | 'maxExtraOpcodeBudget' | 'resourceLimitMultiplier'>
+  query?: GhostkitQueryLimits
+}
 
 /**
  * `DTAlgodClient` if the loaded algosdk is dtalgosdk, else undefined. Its `features` describe the SDK build, not the
@@ -421,7 +427,7 @@ type GkReportedLimits = GhostkitSimulateLimits & { reported: boolean; query?: Gh
  */
 const gkDTAlgod = (): GkDTAlgodClass | undefined => {
   const dt = (gkAlgosdk as unknown as { DTAlgodClient?: Partial<GkDTAlgodClass> }).DTAlgodClient
-  return dt?.features?.includes('simulate-limits') ? (dt as GkDTAlgodClass) : undefined
+  return dt?.features?.includes('capabilities') ? (dt as GkDTAlgodClass) : undefined
 }
 
 /** The managers the dtalgorand fork of algokit-utils adds to `AlgorandClient`, as far as ghostkit uses them. */
@@ -483,24 +489,24 @@ const gkValidityAt = (round: bigint) => ({ firstValidRound: round + 1n, lastVali
 type GkNodeLimits = { simulate: GhostkitSimulateLimits; query?: GhostkitQueryLimits }
 
 /**
- * A dtalgorand node's limits, or `undefined` for stock algod, the only node without them. They come from
- * `DTAlgodClient.simulateLimits()`, which caches them per algod client and is what the fork of algokit-utils reads
- * before each extended simulate and query, so the node is asked once.
+ * A dtalgorand node's limits, or `undefined` for stock algod, the only node without them. They come from the node's
+ * capabilities (`DTAlgodClient.capabilities()`), which dtalgosdk caches per algod client and the fork of algokit-utils
+ * reads before each extended simulate and query, so the node is asked once.
  */
 async function gkFetchLimits(algorand: GkAlgorandClient): Promise<GkNodeLimits | undefined> {
   const dt = gkDTAlgod()
   if (!dt) return undefined
-  const limits = await dt.from(algorand.client.algod).simulateLimits()
-  if (!limits.reported) return undefined
-  const q = limits.query
+  const caps = await dt.from(algorand.client.algod).capabilities()
+  if (!caps.reported) return undefined
+  const q = caps.query
   return {
     simulate: {
-      maxTxnGroups: limits.maxTxnGroups,
-      maxRounds: limits.maxRounds,
-      maxExtraOpcodeBudget: limits.maxExtraOpcodeBudget,
-      resourceLimitMultiplier: limits.resourceLimitMultiplier,
-      timeTravel: limits.timeTravel,
-      developerApi: limits.developerApi,
+      maxTxnGroups: caps.simulate.maxTxnGroups,
+      maxRounds: caps.simulate.maxRounds,
+      maxExtraOpcodeBudget: caps.simulate.maxExtraOpcodeBudget,
+      resourceLimitMultiplier: caps.simulate.resourceLimitMultiplier,
+      timeTravel: caps.timeTravel,
+      developerApi: caps.developerApi,
     },
     ...(q
       ? {
@@ -526,16 +532,16 @@ function gkMissingForks(algorand: GkAlgorandClient): string | undefined {
 
 /**
  * Finds out whether ghost calls can use dtalgorand's queries or extended simulate: the loaded algokit-utils and algosdk
- * must be the dtalgorand forks, and the node must report its simulate limits (`GET /v2/transactions/simulate/limits`),
- * which every dtalgorand node does and stock algod doesn't. The limits also say which of the node's optional features
- * are on: queries (`query`), several rounds per simulate (`maxRounds`) and time travel (`timeTravel`).
+ * must be the dtalgorand forks, and the node must report its capabilities (`GET /v2/capabilities`), which every
+ * dtalgorand node does and stock algod doesn't. They also say which of the node's optional features are on: queries
+ * (`query`), several rounds per simulate (`simulate.maxRounds`) and time travel (`timeTravel`).
  */
 export async function ghostkitDetectNode(algorand: GkAlgorandClient): Promise<GhostkitNode> {
   const stock = (reason: string): GhostkitNode => ({ kind: 'stock', limits: GHOSTKIT_STOCK_LIMITS, reason })
   const missing = gkMissingForks(algorand)
   if (missing) return stock(missing)
   const limits = await gkFetchLimits(algorand)
-  if (!limits) return stock('the node is stock algod (it has no simulate limits)')
+  if (!limits) return stock('the node is stock algod (it reports no capabilities)')
   return { kind: 'dt', limits: limits.simulate, ...(limits.query ? { query: limits.query } : {}) }
 }
 

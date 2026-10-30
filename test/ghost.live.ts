@@ -131,17 +131,17 @@ describe.skipIf(!dtServer)('dtalgorand node (MainNet)', () => {
   // the rewards pool has existed since genesis
   const proposer = '737777777777777777777777777777777777777777777777777UFEJ2CI'
   let last: bigint
-  // whether the node has queries on (POST /v2/query), which the fork then uses; every dtalgorand node reports its limits
+  // whether the node has queries on (POST /v2/query), which the fork then uses; every dtalgorand node reports its capabilities
   let hasQuery = false
   const backend = 'auto'
 
   beforeAll(async () => {
     last = (await algorand.client.algod.status().do()).lastRound
-    const limits = await rest<{ query?: unknown }>(dtServer!, token, '/v2/transactions/simulate/limits')
-    hasQuery = limits.query !== undefined
+    const capabilities = await rest<{ query?: unknown }>(dtServer!, token, '/v2/capabilities')
+    hasQuery = capabilities.query !== undefined
   })
 
-  test('detects the node by its simulate limits, and its queries', async () => {
+  test('detects the node by its capabilities, and its queries', async () => {
     const node = await new GhostV11SDK({ algorand }).getNode()
     expect(node.kind).toBe(fork ? 'dt' : 'stock')
     expect(node.kind === 'dt' && node.query !== undefined).toBe(fork && hasQuery)

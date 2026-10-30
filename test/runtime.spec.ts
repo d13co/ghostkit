@@ -462,37 +462,34 @@ describe('with a stub node', () => {
   })
 
   describe('node detection', () => {
-    const limits = {
-      'max-txn-groups': 8,
-      'max-rounds': 4,
-      'max-extra-opcode-budget': 640000,
-      'resource-limit-multiplier': 64,
+    const capabilities = {
       'time-travel': true,
       'developer-api': false,
       'time-limit-seconds': 54,
+      simulate: { 'max-txn-groups': 8, 'max-rounds': 4, 'max-extra-opcode-budget': 640000, 'resource-limit-multiplier': 64 },
     }
 
-    test.runIf(forkUtils)('reads the limits a dtalgorand node reports', async () => {
-      routes = { '/v2/transactions/simulate/limits': { status: 200, body: limits } }
+    test.runIf(forkUtils)('reads the limits from the capabilities a dtalgorand node reports', async () => {
+      routes = { '/v2/capabilities': { status: 200, body: capabilities } }
       expect(await ghostkitDetectNode(offlineAlgorand(port()))).toEqual({
         kind: 'dt',
         limits: { maxTxnGroups: 8, maxRounds: 4, maxExtraOpcodeBudget: 640000, resourceLimitMultiplier: 64, timeTravel: true, developerApi: false },
       })
     })
 
-    test('takes a node without simulate limits for a stock node', async () => {
+    test('takes a node without capabilities for a stock node', async () => {
       const node = await ghostkitDetectNode(offlineAlgorand(port()))
       expect(node.kind).toBe('stock')
-      if (node.kind === 'stock') expect(node.reason).toMatch(forkUtils ? /no simulate limits/ : /algokit-utils is not the dtalgorand fork/)
+      if (node.kind === 'stock') expect(node.reason).toMatch(forkUtils ? /reports no capabilities/ : /algokit-utils is not the dtalgorand fork/)
     })
 
     test('probes once per AlgorandClient, for every ghostkit SDK on it', async () => {
-      routes = { '/v2/transactions/simulate/limits': { status: 200, body: limits } }
+      routes = { '/v2/capabilities': { status: 200, body: capabilities } }
       const algorand = offlineAlgorand(port())
       const [a, b] = [new GhostV11SDK({ algorand }), new GhostV13SDK({ algorand })]
       await Promise.all([a.getNode(), a.getNode(), b.getNode()])
       await a.atRound(5).getNode()
-      expect(requests.filter((r) => r.startsWith('/v2/transactions/simulate/limits'))).toHaveLength(forkUtils ? 1 : 0)
+      expect(requests.filter((r) => r.startsWith('/v2/capabilities'))).toHaveLength(forkUtils ? 1 : 0)
     })
   })
 
@@ -570,18 +567,15 @@ describe('with a stub node', () => {
       expect(calls[1].groups[0][0].fee).toBe(5_000n)
     })
 
-    /** Serves a dtalgorand node's simulate limits, with time travel on or off. */
+    /** Serves a dtalgorand node's capabilities, with time travel on or off. */
     const dtNode = (timeTravel: boolean) => {
-      routes['/v2/transactions/simulate/limits'] = {
+      routes['/v2/capabilities'] = {
         status: 200,
         body: {
-          'max-txn-groups': 16,
-          'max-rounds': 16,
-          'max-extra-opcode-budget': 320000,
-          'resource-limit-multiplier': 1,
           'time-travel': timeTravel,
           'developer-api': false,
           'time-limit-seconds': 54,
+          simulate: { 'max-txn-groups': 16, 'max-rounds': 16, 'max-extra-opcode-budget': 320000, 'resource-limit-multiplier': 1 },
         },
       }
     }
@@ -681,14 +675,11 @@ describe('with a stub node', () => {
   })
 
   describe.runIf(forkUtils)('queries', () => {
-    const simulateLimits = {
-      'max-txn-groups': 16,
-      'max-rounds': 16,
-      'max-extra-opcode-budget': 640000,
-      'resource-limit-multiplier': 128,
+    const capabilities = {
       'time-travel': true,
       'developer-api': false,
       'time-limit-seconds': 54,
+      simulate: { 'max-txn-groups': 16, 'max-rounds': 16, 'max-extra-opcode-budget': 640000, 'resource-limit-multiplier': 128 },
     }
     const queryLimits = {
       'max-calls': 1024,
@@ -698,9 +689,9 @@ describe('with a stub node', () => {
       'max-response-bytes': 0,
       'max-rounds': 16,
     }
-    /** Serves the simulate limits, with these query limits (none for null). */
+    /** Serves the capabilities, with these query limits (none for null). */
     const serve = (query: Record<string, number> | null = queryLimits) => {
-      routes['/v2/transactions/simulate/limits'] = { status: 200, body: { ...simulateLimits, ...(query ? { query } : {}) } }
+      routes['/v2/capabilities'] = { status: 200, body: { ...capabilities, ...(query ? { query } : {}) } }
     }
     const blk = (s: GhostV11SDK | GhostChunkSDK) => s.blkTimestamp({ methodArgsOrArgsArray: { firstRound: 1n, lastRound: 1n } })
     /** An SDK on the stub node, its algorand.query.run and algorand.simulate faked. */
@@ -744,7 +735,7 @@ describe('with a stub node', () => {
       expect(params.calls.map((c) => c.args!.length)).toEqual([2, 2])
       expect(fetches).not.toHaveBeenCalled()
       expect(simulated.groups).not.toHaveBeenCalled()
-      expect(requests.filter((r) => !r.startsWith('/v2/transactions/simulate/limits'))).toEqual([])
+      expect(requests.filter((r) => !r.startsWith('/v2/capabilities'))).toEqual([])
     })
 
     test('runs past rounds under the latest protocol; null under their own, and a name as given', async () => {
@@ -884,7 +875,7 @@ describe('with a stub node', () => {
       await blk(sdk)
       expect(runs).toHaveLength(0)
       expect(simulated.requests).toHaveLength(1)
-      delete routes['/v2/transactions/simulate/limits']
+      delete routes['/v2/capabilities']
       for (const backend of ['dt', 'query'] as const) {
         const stock = setup(GhostV11SDK, { readerAccount: READER, ghostFee: 0, backend })
         await expect(blk(stock.sdk)).rejects.toThrow(new RegExp(`backend '${backend}' can't be used: the node is stock algod`))
