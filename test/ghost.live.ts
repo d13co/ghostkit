@@ -131,24 +131,19 @@ describe.skipIf(!dtServer)('dtalgorand node (MainNet)', () => {
   // the rewards pool has existed since genesis
   const proposer = '737777777777777777777777777777777777777777777777777UFEJ2CI'
   let last: bigint
-  // a dtalgorand node that doesn't report its simulate limits is only used as one when forced
-  let hasLimits = false
-  // whether the node has queries (POST /v2/query), which the fork then uses
+  // whether the node has queries on (POST /v2/query), which the fork then uses; every dtalgorand node reports its limits
   let hasQuery = false
-  let backend: 'auto' | 'dt' = 'auto'
+  const backend = 'auto'
 
   beforeAll(async () => {
     last = (await algorand.client.algod.status().do()).lastRound
-    const res = await fetch(new URL('/v2/transactions/simulate/limits', dtServer), { headers: { 'X-Algo-API-Token': token } })
-    hasLimits = res.ok
-    hasQuery = hasLimits && (await res.json()).query !== undefined
-    backend = fork && !hasLimits ? 'dt' : 'auto'
-    sdk.backend = backend
+    const limits = await rest<{ query?: unknown }>(dtServer!, token, '/v2/transactions/simulate/limits')
+    hasQuery = limits.query !== undefined
   })
 
   test('detects the node by its simulate limits, and its queries', async () => {
     const node = await new GhostV11SDK({ algorand }).getNode()
-    expect(node.kind).toBe(fork && hasLimits ? 'dt' : 'stock')
+    expect(node.kind).toBe(fork ? 'dt' : 'stock')
     expect(node.kind === 'dt' && node.query !== undefined).toBe(fork && hasQuery)
   })
 
@@ -275,11 +270,9 @@ describe.skipIf(!dtServer)('dtalgorand node (MainNet)', () => {
       }
     })
 
-    // `key` and `boxPrefix` need a node built with versions filters: run these against the node with queries (the
-    // query build, e.g. 127.0.0.1:8081); they skip on a node without queries, like the query tests
     describe('with key and prefix filters', () => {
       test('a global state key', async (ctx) => {
-        if (!fork || !hasQuery) ctx.skip()
+        if (!fork) ctx.skip()
         const { rounds, next } = await ghostkitChangeRounds(algorand, [{ app: REGISTRY, key: 'numV' }], { order: 'desc', maxRound: 66_000_000n, limit: 2 })
         expect({ rounds, next }).toEqual({ rounds: [65_770_003n, 65_687_419n], next: 65_687_418n })
         // numV changed in each of these rounds
@@ -295,7 +288,7 @@ describe.skipIf(!dtServer)('dtalgorand node (MainNet)', () => {
       })
 
       test('a box prefix', async (ctx) => {
-        if (!fork || !hasQuery) ctx.skip()
+        if (!fork) ctx.skip()
         const { rounds, next } = await ghostkitChangeRounds(algorand, [{ app: REGISTRY, boxPrefix: 'v' }], { maxRound: 66_000_000n, limit: 3 })
         expect({ rounds, next }).toEqual({ rounds: [46_519_818n, 46_519_867n, 46_520_427n], next: 46_520_428n })
       })

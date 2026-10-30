@@ -9,7 +9,7 @@ export type GhostkitExtraMethodCallArgs = Omit<GkCommonAppCallParams, 'appId' | 
 /** Simulate options. They are spread over the defaults (`extraOpcodeBudget: 170_000`, `allowMoreLogging`, `allowUnnamedResources`). */
 export type GhostkitSimulateOptions = Omit<GkRawSimulateOptions, 'allowEmptySignatures' | 'fixSigners'> & {
     /**
-     * dtalgorand nodes only: simulate under a later consensus protocol (`v24`..`v42`, `latest`, `future` or a version
+     * dtalgorand nodes only: simulate under a later consensus protocol (`v24`..`v43`, `latest`, `future` or a version
      * string), as if an upgrade took effect right after the round. Defaults to `latest` at past rounds, since a ghost's
      * AVM version is usually newer than old rounds allow (a no-op at rounds already on the latest protocol); `null`
      * simulates each round under its own protocol.
@@ -87,12 +87,14 @@ export type GhostkitQueryLimits = {
     maxCallBudget: number;
     /** The most log bytes of each call; 0 for the consensus limits (1,024 bytes, 32 logs). */
     maxCallLogBytes: number;
+    /** The most bytes of ledger state each call may read; 0 for no limit. A call that reads more fails on its own. */
+    maxCallStateBytes: number;
     /** The most bytes of a response's logs and errors; 0 for no limit. */
     maxResponseBytes: number;
 };
 /**
- * What ghostkit found about the node and libraries. A dtalgorand node has `query` when it has queries and the loaded
- * dtalgorand forks can send them.
+ * What ghostkit found about the node and libraries: `dt` when the dtalgorand forks are loaded and the node is a
+ * dtalgorand node, with `query` when the node has queries on.
  */
 export type GhostkitNode = {
     kind: 'dt';
@@ -105,7 +107,7 @@ export type GhostkitNode = {
 };
 /** The limits of a stock algod's simulate. */
 export declare const GHOSTKIT_STOCK_LIMITS: GhostkitSimulateLimits;
-/** The default limits of a dtalgorand node, which `backend: 'dt'` assumes for a node that doesn't report its own. */
+/** The limits of a dtalgorand node with its default config: the default of `ghostkitDTBackend` and `ghostkitQueryBackend`. */
 export declare const GHOSTKIT_DT_DEFAULT_LIMITS: GhostkitSimulateLimits;
 /** How a `protocol` override applied at a round. */
 export type GhostkitProtocolOverride = {
@@ -213,9 +215,9 @@ export type GhostkitSDKParams = {
     /**
      * How to run ghost calls. With algokit-utils and algosdk the dtalgorand forks, `auto` (default) uses read-only queries
      * (`POST /v2/query`) when the node has them, with dtalgorand's extended simulate for calls that need simulate (see the
-     * README) and as the fallback, and the extended simulate on a dtalgorand node without queries; else one simulate per
-     * group. `query` always queries, and throws for calls that need simulate. `dt` always uses the extended simulate
-     * (with dtalgorand's default limits if the node reports none), `stock` never; or pass your own `GhostkitBackend`.
+     * README), and the extended simulate on a dtalgorand node with queries off; else one simulate per group. `query`
+     * always queries, and throws for calls that need simulate and on a node without queries. `dt` always uses the
+     * extended simulate, and throws on stock algod. `stock` never uses either; or pass your own `GhostkitBackend`.
      */
     backend?: 'auto' | 'query' | 'dt' | 'stock' | GhostkitBackend;
     /**
@@ -244,7 +246,8 @@ type GkAwaitedAll<T> = T extends readonly unknown[] ? {
 /**
  * Finds out whether ghost calls can use dtalgorand's queries or extended simulate: the loaded algokit-utils and algosdk
  * must be the dtalgorand forks, and the node must report its simulate limits (`GET /v2/transactions/simulate/limits`),
- * with query limits for queries (and forks that have them).
+ * which every dtalgorand node does and stock algod doesn't. The limits also say which of the node's optional features
+ * are on: queries (`query`), several rounds per simulate (`maxRounds`) and time travel (`timeTravel`).
  */
 export declare function ghostkitDetectNode(algorand: GkAlgorandClient): Promise<GhostkitNode>;
 /** One simulate request per group, as any algod takes them. */
@@ -365,8 +368,9 @@ export type GhostkitChangeRoundsOptions = {
  * - The node's versions errors pass through: a listing over the node's time limit (504) or a history it can't serve
  *   (503) isn't retried, so narrow the range. Pages can be short or empty (`key`, `boxPrefix`); they are followed to the end.
  *
- * Needs the dtalgorand fork of algokit-utils (`algorand.dt`, `9.2.3-dt.3.0.0.1` or later) and algosdk (`3.9.0-dt.3.0.0.1`
- * or later for `key` and `boxPrefix`).
+ * Needs the dtalgorand forks of algokit-utils (`algorand.dt`) and algosdk, and a dtalgorand node with time travel
+ * (`getNode()` has `limits.timeTravel`). On stock algod or a node with time travel off, the fork of algokit-utils
+ * rejects the call with dtalgosdk's `DTUnsupportedError` before listing anything.
  *
  * @example
  * const { rounds } = await ghostkitChangeRounds(algorand, [{ app: poolAppId, box: 'stakers' }], { minRound, maxRound })
@@ -432,10 +436,6 @@ type GkShared = {
     methods?: Map<string, GkArc56Contract['methods'][number]>;
     returnTypes: Map<string, string>;
     warned: Set<string>;
-    /** the backend `auto` fell back to after the node turned out not to support queries or the extended simulate */
-    fallback?: GhostkitBackend;
-    /** why the node rejected querying a program or app (by `gkQueryKey`), which `auto` then simulates */
-    unqueryable: Map<string, string>;
 };
 type GkSuggestedParams = Awaited<ReturnType<GkAlgorandClient['getSuggestedParams']>>;
 /** The base of every ghostkit SDK. */
@@ -506,9 +506,10 @@ export declare class GhostkitBase<TFactory, TClient> {
     private _gkCollectWithShape;
     private _gkView;
     private _gkWarn;
-    /** The node's limits, as the forced backends read them: cached per AlgorandClient. */
-    private _gkLimits;
-    /** The backend for this call. Detection is cached per AlgorandClient, so this costs no request after the first. */
+    /**
+     * The backend for this call, by what `getNode()` found: the forced backends `dt` and `query` throw on a node or
+     * libraries without what they need. Detection is cached per AlgorandClient, so this costs no request after the first.
+     */
     private _gkResolveBackend;
     /** The backend `auto` simulates with when a run can't be queried. */
     private _gkSimulateBackend;
@@ -534,24 +535,20 @@ export declare class GhostkitBase<TFactory, TClient> {
     private _gkChunk;
     /**
      * Runs prepared calls at the target. With `auto`, a run on the query backend goes to simulate when it can't be queried
-     * (`_gkQueryBlocker`) or the node rejects the query (`_gkQueryFallback`); the extended simulate falls back to one
-     * simulate per group if the node turns out not to support it.
+     * (`_gkQueryBlocker`, `_gkQueryFallback`).
      */
     private _gkRun;
-    /** What `_gkShared.unqueryable` remembers the node's rejection of this SDK's queries by: the ghost program or the app. */
-    private _gkQueryKey;
     /** Why a run must be simulated rather than queried, or undefined if it can be queried. */
     private _gkQueryBlocker;
     /**
-     * Whether `auto` simulates a run whose query failed with `e`, and why; undefined to throw. A group the query backend
-     * can't send and a request the node rejects (400) simulate this run; a node without queries (a load balancer mixing
-     * nodes) makes `auto` simulate from now on (`sticky`).
+     * Why `auto` simulates a run whose query failed with `e`, or undefined to throw. Two failures are only the query's:
+     * a group the query backend can't send, and a round after the node's latest one, which fails a whole query request
+     * (400) but only that round of a simulate. The node's other 400s would fail the simulate too.
      */
     private _gkQueryFallback;
     /**
-     * What the reader can spend at a round (the latest if undefined) over its minimum balance; undefined if unknown. A node
-     * that can't read the account at the round (a stock node answers with the latest, a dtalgorand node without time travel
-     * fails) gives its latest balance, the best guess.
+     * What the reader can spend at a round (the latest if undefined) over its minimum balance; undefined if unknown. Only a
+     * dtalgorand node with time travel reads accounts at past rounds; other nodes give the latest balance, the best guess.
      */
     private _gkSpendable;
     private _gkSpendableOf;

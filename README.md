@@ -207,7 +207,7 @@ const [first] = await ghostSDK.atRounds([45_000_000n], (s) => [s.blkTimestamp({ 
 
 A stock node can only simulate its last few rounds (usually 4). A dtalgorand node with time travel can simulate any round since genesis, and `atRounds` sends the rounds in as few requests as its limits allow, however far apart they are: with queries, one request per up to `maxCalls` app calls (1,024 by default) and `maxRounds` rounds (16). On a stock node, `atRounds` sends one request per call and round.
 
-Older rounds ran older protocols, which reject recent AVM versions: the example ghost is AVM 11, and MainNet round 40,000,000 only allowed up to AVM 10. On a dtalgorand node past rounds therefore run under the latest protocol by default (queries too), as if it took effect right after the round. This changes nothing at rounds that already ran it. Each round's result has a `protocolOverride` that says whether it applied, with notes on any data the old round never produced. Pass `protocol: null` to simulate each round under its own protocol, or a protocol name (`v24`..`v42`, `latest`) for another.
+Older rounds ran older protocols, which reject recent AVM versions: the example ghost is AVM 11, and MainNet round 40,000,000 only allowed up to AVM 10. On a dtalgorand node past rounds therefore run under the latest protocol by default (queries too), as if it took effect right after the round. This changes nothing at rounds that already ran it. Each round's result has a `protocolOverride` that says whether it applied, with notes on any data the old round never produced. Pass `protocol: null` to simulate each round under its own protocol, or a protocol name (`v24`..`v43`, `latest`) for another.
 
 #### Rounds where things changed
 
@@ -233,7 +233,7 @@ Keys, box names and prefixes given as strings are UTF-8. Options: `minRound`, `m
 - Round 0 (genesis allocations) is never listed: to `atRounds`, 0 means the latest round.
 - `key` and `boxPrefix` filter on the node, which examines a bounded number of versions per page, so pages can be short or empty; they are followed to the end.
 - The node's versions errors pass through and aren't retried: a listing that runs over the node's time limit (504) or a history it can't serve (503). Narrow the range.
-- It needs the dtalgorand forks: algokit-utils `9.2.3-dt.3.0.0.1` or later (`algorand.dt`; with stock algokit-utils it throws) and algosdk `3.9.0-dt.3.0.0.1` or later for `key` and `boxPrefix`.
+- It needs the dtalgorand forks of algokit-utils (`algorand.dt`; with stock algokit-utils it throws) and algosdk, and a dtalgorand node with time travel (`getNode()` shows `limits.timeTravel`). On stock algod or a node with time travel off, the fork of algokit-utils rejects the call with dtalgosdk's `DTUnsupportedError` before listing anything.
 
 ### Batching calls
 
@@ -325,7 +325,7 @@ Signatures are skipped: the reader account never signs. `extraSimulateArgs.proto
 - `allowMoreLogging` is on (the default) and the node's `maxCallLogBytes` is less than simulate's 65,536;
 - `atRounds` gets `validityWindow: 'skip'` or `null`;
 - `extraMethodCallArgs` sets a field a query can't (see [Extra method-call args](#extra-method-call-args-fees--validity)), or the method has transaction arguments;
-- the node rejects the query as a whole (HTTP 400), e.g. a round after its latest one or a program it won't query: that call is simulated, and a rejected program is simulated from then on by that SDK instance.
+- the node rejects the query because a round is after its latest one (HTTP 400): a query fails as a whole, while a simulate fails only that round. The node's other rejections are thrown, since a simulate would fail the same way.
 
 `backend: 'query'` throws for these instead.
 
@@ -348,7 +348,7 @@ A [dtalgorand](https://github.com/d13co/dt-algorand) node is an algod that can a
 | stock algokit-utils & algosdk | one simulate per group; the last few rounds | one simulate per group; any round, under its own protocol | as without queries |
 | dtalgorand forks | one simulate per group; the last few rounds | groups and rounds batched; any round, under the latest protocol; larger resource limits | queries: app calls and rounds batched, no fees or balances; simulate for calls that need it |
 
-With `backend: 'auto'` (the default), the SDK checks once which applies: whether algokit-utils and algosdk are the forks, then whether the node reports its simulate limits (`GET /v2/transactions/simulate/limits`, which only dtalgorand nodes serve), and query limits in them. `await ghostSDK.getNode()` shows what it found: `getNode().query` has the query limits when the node has queries and the forks can send them. `backend: 'stock'` skips the checks. `backend: 'dt'` uses the extended simulate whatever the node, with dtalgorand's default limits if it reports none, and throws if the forks are missing. `backend: 'query'` always queries: it throws for calls that need simulate (see [Simulate options](#simulate-options)) and fails on a node without queries.
+With `backend: 'auto'` (the default), the SDK checks once which applies: whether algokit-utils and algosdk are the forks, then whether the node reports its simulate limits (`GET /v2/transactions/simulate/limits`). Every dtalgorand node serves them and stock algod doesn't, so this one request tells them apart; no request is checked for signs of stock algod after that. The limits also say which of the node's optional features are on: queries (`query`), several rounds per simulate (`maxRounds` above 0) and time travel (`timeTravel`). `await ghostSDK.getNode()` shows what it found: `getNode().query` has the query limits when the node has queries on. `backend: 'stock'` skips the checks. `backend: 'dt'` always uses the extended simulate, and throws without the forks or on stock algod. `backend: 'query'` always queries: it throws for calls that need simulate (see [Simulate options](#simulate-options)), without the forks, and on a node with queries off.
 
 Queries and simulate give the same results for ghost calls, except where a ghost depends on what only one of them does: queries check no fees or balances (so an unfunded reader works), run each app call alone with `maxCallBudget`, and report only the called app's logs, as simulate does for ghostkit.
 
@@ -392,10 +392,10 @@ new Map(accounts.map((addr, i) => [addr, auths[i] === ZERO_ADDRESS ? undefined :
 A call makes one simulate request, or more where the node needs them: on a stock node one per group (and per round with `atRounds`); on a dtalgorand node as many as its limits require. With queries, a call makes one query request per up to `maxCalls` app calls (1,024 by default) × `maxRounds` rounds (16), up to 4 at a time, and nothing else: no suggested params, no fee sink lookup (unless a method has an `account` argument, which can encode the sender) and no balance reads. A busy node (503 "the node is busy") is retried by the HTTP client of an `AlgorandClient` made from a config (`AlgorandClient.fromConfig`, `mainNet()`, ...), honoring `Retry-After`, or after at least 1 s where the header can't be read (browsers, cross-origin); one made with `fromClients` passes the error on. 503s for history the node can't serve (an incomplete index, a time-travel history that isn't served) and query 504s aren't retried: queries that run over the node's time limit are split by algokit-utils; simulates over it are retried, as upstream algokit-utils does. On top of that, for simulates:
 
 - **Suggested params**, for calls at the latest round, when the cached ones are older than `cacheParamsTimeout` (default 3 s; ghost calls tolerate params a few rounds old, since their validity window is 10 rounds). Calls at past rounds set their own validity, so they reuse params of any age. Params come through `algorand.getSuggestedParams()`, so the AlgorandClient's own cache applies too, and ghostkit never changes it.
-- **Once per AlgorandClient**: the node's simulate limits (`GET /v2/transactions/simulate/limits`, only with the dtalgorand forks loaded and `backend: 'auto'` or `'dt'`), and the genesis to find the fee sink (only without `readerAccount`, and not on MainNet or TestNet, whose fee sinks ghostkit knows).
-- **With `ghostFee: 'max'`**, the reader's balance, cached like suggested params (and for good at past rounds). `atRounds` reads it once per round, up to 8 at a time. Possible improvement, not done: on a dtalgorand node with versions `rounds`, one `accountVersions(reader).rounds(...)` request (values, `exclude=all`) gives the balance and minimum balance at up to 1,000 rounds; round 0 would have to stay a latest read, since to versions it is genesis.
+- **Once per AlgorandClient**: the node's simulate limits (`GET /v2/transactions/simulate/limits`, only with the dtalgorand forks loaded, and with `backend: 'stock'` or a custom backend only for `ghostFee: 'max'` at past rounds), and the genesis to find the fee sink (only without `readerAccount`, and not on MainNet or TestNet, whose fee sinks ghostkit knows).
+- **With `ghostFee: 'max'`**, the reader's balance, cached like suggested params. At past rounds a dtalgorand node with time travel reads it at the round, and it is kept for good; other nodes give the latest balance. `atRounds` reads it once per round, up to 8 at a time. Possible improvement, not done: on a dtalgorand node with versions `rounds`, one `accountVersions(reader).rounds(...)` request (values, `exclude=all`) gives the balance and minimum balance at up to 1,000 rounds; round 0 would have to stay a latest read, since to versions it is genesis.
 
-These caches are shared by every ghostkit SDK on the same AlgorandClient, including SDKs generated from different contracts, and concurrent calls share requests in flight. A failed request isn't cached. Node detection isn't repeated, so restart to pick up a node that changed; an `auto` SDK that finds queries unsupported at run time falls back to the extended simulate, and one that finds the extended simulate unsupported to one simulate per group.
+These caches are shared by every ghostkit SDK on the same AlgorandClient, including SDKs generated from different contracts, and concurrent calls share requests in flight. A failed request isn't cached. Node detection isn't repeated, so restart to pick up a node whose config changed.
 
 ```typescript
 const ghostSDK = new GhostofavmSDK({ algorand, cacheParamsTimeout: 10_000 }) // reuse params for 10 s
@@ -461,16 +461,16 @@ To install ghostkit on your own project, you must currently use the alpha channe
 npm i ghostkit@alpha
 ```
 
-To use the dtalgorand forks in your project, install them in place of `@algorandfoundation/algokit-utils` and `algosdk` so that your project loads one copy of each: `@d13co/dt-algokit-utils` (`9.2.3-dt.2.0.1.0` or later for queries, `9.2.3-dt.3.0.0.1` or later for `ghostkitChangeRounds`) and `dtalgosdk` (`3.9.0-dt.2.0.1.0` or later, `3.9.0-dt.3.0.0.1` or later for `ghostkitChangeRounds`), aliased to the stock names, e.g. `"@algorandfoundation/algokit-utils": "file:vendor/d13co-dt-algokit-utils-9.2.3-dt.3.0.0.1.tgz"` and `"algosdk": "file:vendor/dtalgosdk-3.9.0-dt.3.0.0.1.tgz"`. Their versions are prereleases, which no `^x.y.z` peer range accepts, so with npm set `legacy-peer-deps=true` in `.npmrc`, or use pnpm `overrides`.
+To use the dtalgorand forks in your project, install them in place of `@algorandfoundation/algokit-utils` and `algosdk` so that your project loads one copy of each: `@d13co/dt-algokit-utils` `9.2.3-dt.4.0.0.1` and `dtalgosdk` `3.9.0-dt.4.0.0.1`, aliased to the stock names, e.g. `"@algorandfoundation/algokit-utils": "file:vendor/d13co-dt-algokit-utils-9.2.3-dt.4.0.0.1.tgz"` and `"algosdk": "file:vendor/dtalgosdk-3.9.0-dt.4.0.0.1.tgz"`. Ghostkit supports the current dtalgorand release only, not nodes or forks of earlier ones. Their versions are prereleases, which no `^x.y.z` peer range accepts, so with npm set `legacy-peer-deps=true` in `.npmrc`, or use pnpm `overrides`.
 
 ### Development
 
-The dtalgorand forks are vendored in `vendor/` for now (`dtalgosdk-3.9.0-dt.3.0.0.1.tgz`, `d13co-dt-algokit-utils-9.2.3-dt.3.0.0.1.tgz`), which is why `.npmrc` sets `legacy-peer-deps`.
+The dtalgorand forks are vendored in `vendor/` for now (`dtalgosdk-3.9.0-dt.4.0.0.1.tgz`, `d13co-dt-algokit-utils-9.2.3-dt.4.0.0.1.tgz`), which is why `.npmrc` sets `legacy-peer-deps`.
 
 - `npm run build`: compiles ghostkit and regenerates `examples/GhostofavmSDK.ts`.
 - `npm run check:example`: type-checks the example SDK and the tests against the fork of algokit-utils, and the example SDK against stock algokit-utils.
 - `npm test`: unit tests, offline, once with each algokit-utils.
-- `npm run test:live`: live tests, once with each algokit-utils. Set `ALGOD_SERVER` (e.g. `http://localhost:4001`, a LocalNet on consensus v42) and/or `DT_ALGOD_SERVER` (a MainNet dtalgorand node with time travel); tokens in `ALGOD_TOKEN` / `DT_ALGOD_TOKEN`. Run the dtalgorand suite against a node with queries and one without, to cover both queries and the simulate fallback; the query-only tests, and the `ghostkitChangeRounds` tests with `key` and `boxPrefix` (which need a node built with versions filters), skip on a node without queries.
+- `npm run test:live`: live tests, once with each algokit-utils. Set `ALGOD_SERVER` (e.g. `http://localhost:4001`, a LocalNet on consensus v42) and/or `DT_ALGOD_SERVER` (a MainNet dtalgorand node with time travel); tokens in `ALGOD_TOKEN` / `DT_ALGOD_TOKEN`. Run the dtalgorand suite against a node with queries on and one with them off (`MaxAPIQueryCalls: 0`), to cover both queries and the extended simulate; the query-only tests skip on a node with queries off.
 
 The SDK's runtime is `src/templates/runtime.ts`, a regular module that ghostkit inlines into each generated SDK.
 

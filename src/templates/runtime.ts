@@ -28,7 +28,7 @@ export type GhostkitExtraMethodCallArgs = Omit<GkCommonAppCallParams, 'appId' | 
 /** Simulate options. They are spread over the defaults (`extraOpcodeBudget: 170_000`, `allowMoreLogging`, `allowUnnamedResources`). */
 export type GhostkitSimulateOptions = Omit<GkRawSimulateOptions, 'allowEmptySignatures' | 'fixSigners'> & {
   /**
-   * dtalgorand nodes only: simulate under a later consensus protocol (`v24`..`v42`, `latest`, `future` or a version
+   * dtalgorand nodes only: simulate under a later consensus protocol (`v24`..`v43`, `latest`, `future` or a version
    * string), as if an upgrade took effect right after the round. Defaults to `latest` at past rounds, since a ghost's
    * AVM version is usually newer than old rounds allow (a no-op at rounds already on the latest protocol); `null`
    * simulates each round under its own protocol.
@@ -111,13 +111,15 @@ export type GhostkitQueryLimits = {
   maxCallBudget: number
   /** The most log bytes of each call; 0 for the consensus limits (1,024 bytes, 32 logs). */
   maxCallLogBytes: number
+  /** The most bytes of ledger state each call may read; 0 for no limit. A call that reads more fails on its own. */
+  maxCallStateBytes: number
   /** The most bytes of a response's logs and errors; 0 for no limit. */
   maxResponseBytes: number
 }
 
 /**
- * What ghostkit found about the node and libraries. A dtalgorand node has `query` when it has queries and the loaded
- * dtalgorand forks can send them.
+ * What ghostkit found about the node and libraries: `dt` when the dtalgorand forks are loaded and the node is a
+ * dtalgorand node, with `query` when the node has queries on.
  */
 export type GhostkitNode =
   | { kind: 'dt'; limits: GhostkitSimulateLimits; query?: GhostkitQueryLimits }
@@ -133,7 +135,7 @@ export const GHOSTKIT_STOCK_LIMITS: GhostkitSimulateLimits = Object.freeze({
   developerApi: false,
 })
 
-/** The default limits of a dtalgorand node, which `backend: 'dt'` assumes for a node that doesn't report its own. */
+/** The limits of a dtalgorand node with its default config: the default of `ghostkitDTBackend` and `ghostkitQueryBackend`. */
 export const GHOSTKIT_DT_DEFAULT_LIMITS: GhostkitSimulateLimits = Object.freeze({
   maxTxnGroups: 16,
   maxRounds: 16,
@@ -251,9 +253,9 @@ export type GhostkitSDKParams = {
   /**
    * How to run ghost calls. With algokit-utils and algosdk the dtalgorand forks, `auto` (default) uses read-only queries
    * (`POST /v2/query`) when the node has them, with dtalgorand's extended simulate for calls that need simulate (see the
-   * README) and as the fallback, and the extended simulate on a dtalgorand node without queries; else one simulate per
-   * group. `query` always queries, and throws for calls that need simulate. `dt` always uses the extended simulate
-   * (with dtalgorand's default limits if the node reports none), `stock` never; or pass your own `GhostkitBackend`.
+   * README), and the extended simulate on a dtalgorand node with queries off; else one simulate per group. `query`
+   * always queries, and throws for calls that need simulate and on a node without queries. `dt` always uses the
+   * extended simulate, and throws on stock algod. `stock` never uses either; or pass your own `GhostkitBackend`.
    */
   backend?: 'auto' | 'query' | 'dt' | 'stock' | GhostkitBackend
   /**
@@ -330,8 +332,6 @@ const GK_GLOBAL_UINT_MIN_BALANCE = 28_500n
 const GK_GLOBAL_BYTES_MIN_BALANCE = 50_000n
 /** The ABI return log prefix. */
 const GK_RETURN_PREFIX = [0x15, 0x1f, 0x7c, 0x75]
-/** Where a dtalgorand node reports its simulate limits; other nodes answer 404. */
-const GK_LIMITS_PATH = '/v2/transactions/simulate/limits'
 /** The zero address: a query sent from it runs as the round's fee sink. */
 const GK_ZERO_ADDRESS = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAY5HFKQ'
 /**
@@ -374,10 +374,6 @@ type GkSimulateManager = {
   ): Promise<{ round: bigint; groups: GkDTOutcome[]; protocolOverride?: GhostkitProtocolOverride }[]>
 }
 
-const gkSimulateManager = (algorand: GkAlgorandClient): GkSimulateManager | undefined => {
-  const manager = (algorand as unknown as { simulate?: Partial<GkSimulateManager> }).simulate
-  return typeof manager?.groups === 'function' && typeof manager?.rounds === 'function' ? (manager as GkSimulateManager) : undefined
-}
 
 /** The queries of the dtalgorand fork of algokit-utils (`algorand.query.run`), as far as ghostkit uses them. */
 type GkQueryCall = {
@@ -406,11 +402,35 @@ type GkQueryManager = {
   ): Promise<{ round: bigint; protocolOverride?: GhostkitProtocolOverride; calls: GkQueryCallOutcome[] }[]>
 }
 
-const gkQueryManager = (algorand: GkAlgorandClient): GkQueryManager | undefined => {
-  const manager = (algorand as unknown as { query?: Partial<GkQueryManager> }).query
-  if (typeof manager?.run !== 'function') return undefined
-  const dtClient = (gkAlgosdk as unknown as { DTAlgodClient?: { features?: readonly string[] } }).DTAlgodClient
-  return dtClient?.features?.includes('query') ? (manager as GkQueryManager) : undefined
+/** `DTAlgodClient` of dtalgosdk, the dtalgorand fork of algosdk, as far as ghostkit uses it. */
+type GkDTAlgodClass = {
+  features: readonly string[]
+  from(algod: unknown): {
+    simulateLimits(): Promise<GkReportedLimits>
+    accountInformation(address: string): { exclude(exclude: 'all'): { round(round: bigint): { do(): Promise<GkAccountBalance> } } }
+  }
+}
+/** The balance fields of an algosdk `Account`. */
+type GkAccountBalance = { amount: bigint; minBalance: bigint }
+/** What `DTAlgodClient.simulateLimits()` returns, as far as ghostkit uses it. */
+type GkReportedLimits = GhostkitSimulateLimits & { reported: boolean; query?: GhostkitQueryLimits }
+
+/**
+ * `DTAlgodClient` if the loaded algosdk is dtalgosdk, else undefined. Its `features` describe the SDK build, not the
+ * node: they only tell dtalgosdk from stock algosdk here.
+ */
+const gkDTAlgod = (): GkDTAlgodClass | undefined => {
+  const dt = (gkAlgosdk as unknown as { DTAlgodClient?: Partial<GkDTAlgodClass> }).DTAlgodClient
+  return dt?.features?.includes('simulate-limits') ? (dt as GkDTAlgodClass) : undefined
+}
+
+/** The managers the dtalgorand fork of algokit-utils adds to `AlgorandClient`, as far as ghostkit uses them. */
+type GkForkUtils = { simulate: GkSimulateManager; query: GkQueryManager; dt: GkDTManager }
+
+/** The fork of algokit-utils' managers if the loaded algokit-utils is the fork (it adds `algorand.simulate`), else undefined. */
+const gkForkUtils = (algorand: GkAlgorandClient): GkForkUtils | undefined => {
+  const fork = algorand as unknown as Partial<GkForkUtils>
+  return fork.simulate ? (fork as GkForkUtils) : undefined
 }
 
 const gkStatus = (e: unknown): number | undefined => {
@@ -463,102 +483,60 @@ const gkValidityAt = (round: bigint) => ({ firstValidRound: round + 1n, lastVali
 type GkNodeLimits = { simulate: GhostkitSimulateLimits; query?: GhostkitQueryLimits }
 
 /**
- * Reads a dtalgorand node's limits, or `undefined` if the node doesn't report them. With the fork of algosdk they come
- * from `DTAlgodClient.simulateLimits()`, which caches them per algod client and is what the fork of algokit-utils reads
- * before each extended simulate and query, so the node is asked once. Only that path reports query limits.
+ * A dtalgorand node's limits, or `undefined` for stock algod, the only node without them. They come from
+ * `DTAlgodClient.simulateLimits()`, which caches them per algod client and is what the fork of algokit-utils reads
+ * before each extended simulate and query, so the node is asked once.
  */
 async function gkFetchLimits(algorand: GkAlgorandClient): Promise<GkNodeLimits | undefined> {
-  const dt = (
-    gkAlgosdk as unknown as {
-      DTAlgodClient?: {
-        features?: readonly string[]
-        from?: (
-          algod: unknown,
-        ) => { simulateLimits?: () => Promise<GhostkitSimulateLimits & { reported?: boolean; query?: GhostkitQueryLimits }> }
-      }
-    }
-  ).DTAlgodClient
-  if (dt?.features?.includes('simulate-limits') && typeof dt.from === 'function') {
-    const client = dt.from(algorand.client.algod)
-    if (typeof client.simulateLimits === 'function') {
-      const limits = await client.simulateLimits()
-      if (!limits.reported) return undefined
-      const q = limits.query
-      return {
-        simulate: {
-          maxTxnGroups: Math.max(1, limits.maxTxnGroups),
-          maxRounds: limits.maxRounds,
-          maxExtraOpcodeBudget: limits.maxExtraOpcodeBudget,
-          resourceLimitMultiplier: Math.max(1, limits.resourceLimitMultiplier),
-          timeTravel: limits.timeTravel === true,
-          developerApi: limits.developerApi === true,
-        },
-        ...(q
-          ? {
-              query: {
-                maxCalls: q.maxCalls,
-                maxRounds: q.maxRounds,
-                maxCallBudget: q.maxCallBudget,
-                maxCallLogBytes: q.maxCallLogBytes,
-                maxResponseBytes: q.maxResponseBytes,
-              },
-            }
-          : {}),
-      }
-    }
-  }
-  const http = (algorand.client.algod as unknown as { c?: { get?: (o: { relativePath: string }) => Promise<{ text?: string; body?: Uint8Array }> } }).c
-  if (typeof http?.get !== 'function') return undefined
-  let res: { text?: string; body?: Uint8Array }
-  try {
-    res = await http.get({ relativePath: GK_LIMITS_PATH })
-  } catch (e) {
-    if (gkStatus(e) === 404) return undefined
-    throw e
-  }
-  const raw = JSON.parse(res.text ?? new TextDecoder().decode(res.body)) as Record<string, unknown>
-  const num = (key: string, fallback: number) => (typeof raw[key] === 'number' ? (raw[key] as number) : fallback)
+  const dt = gkDTAlgod()
+  if (!dt) return undefined
+  const limits = await dt.from(algorand.client.algod).simulateLimits()
+  if (!limits.reported) return undefined
+  const q = limits.query
   return {
     simulate: {
-      maxTxnGroups: Math.max(1, num('max-txn-groups', GHOSTKIT_DT_DEFAULT_LIMITS.maxTxnGroups)),
-      maxRounds: num('max-rounds', GHOSTKIT_DT_DEFAULT_LIMITS.maxRounds),
-      maxExtraOpcodeBudget: num('max-extra-opcode-budget', GHOSTKIT_DT_DEFAULT_LIMITS.maxExtraOpcodeBudget),
-      resourceLimitMultiplier: Math.max(1, num('resource-limit-multiplier', 1)),
-      timeTravel: raw['time-travel'] === true,
-      developerApi: raw['developer-api'] === true,
+      maxTxnGroups: limits.maxTxnGroups,
+      maxRounds: limits.maxRounds,
+      maxExtraOpcodeBudget: limits.maxExtraOpcodeBudget,
+      resourceLimitMultiplier: limits.resourceLimitMultiplier,
+      timeTravel: limits.timeTravel,
+      developerApi: limits.developerApi,
     },
+    ...(q
+      ? {
+          query: {
+            maxCalls: q.maxCalls,
+            maxRounds: q.maxRounds,
+            maxCallBudget: q.maxCallBudget,
+            maxCallLogBytes: q.maxCallLogBytes,
+            maxCallStateBytes: q.maxCallStateBytes,
+            maxResponseBytes: q.maxResponseBytes,
+          },
+        }
+      : {}),
   }
 }
 
-/** Why the loaded libraries can't do dtalgorand's extended simulate, or undefined if they can. */
+/** Why the loaded libraries can't use a dtalgorand node's extensions, or undefined if they can. */
 function gkMissingForks(algorand: GkAlgorandClient): string | undefined {
-  if (!gkSimulateManager(algorand)) return 'the loaded algokit-utils is not the dtalgorand fork'
-  const dtClient = (gkAlgosdk as unknown as { DTAlgodClient?: { features?: readonly string[] } }).DTAlgodClient
-  if (!dtClient?.features?.includes('group-results')) return 'the loaded algosdk is not the dtalgorand fork'
-  return undefined
-}
-
-/** Why the loaded libraries can't send queries, or undefined if they can. */
-function gkMissingQuery(algorand: GkAlgorandClient): string | undefined {
-  const missing = gkMissingForks(algorand)
-  if (missing) return missing
-  if (!gkQueryManager(algorand)) return 'the loaded dtalgorand forks of algokit-utils and algosdk have no queries'
+  if (!gkForkUtils(algorand)) return 'the loaded algokit-utils is not the dtalgorand fork'
+  if (!gkDTAlgod()) return 'the loaded algosdk is not the dtalgorand fork (dtalgosdk)'
   return undefined
 }
 
 /**
  * Finds out whether ghost calls can use dtalgorand's queries or extended simulate: the loaded algokit-utils and algosdk
  * must be the dtalgorand forks, and the node must report its simulate limits (`GET /v2/transactions/simulate/limits`),
- * with query limits for queries (and forks that have them).
+ * which every dtalgorand node does and stock algod doesn't. The limits also say which of the node's optional features
+ * are on: queries (`query`), several rounds per simulate (`maxRounds`) and time travel (`timeTravel`).
  */
 export async function ghostkitDetectNode(algorand: GkAlgorandClient): Promise<GhostkitNode> {
   const stock = (reason: string): GhostkitNode => ({ kind: 'stock', limits: GHOSTKIT_STOCK_LIMITS, reason })
   const missing = gkMissingForks(algorand)
   if (missing) return stock(missing)
   const limits = await gkFetchLimits(algorand)
-  if (!limits) return stock('the node is not a dtalgorand node (no simulate limits)')
-  const query = limits.query && !gkMissingQuery(algorand) ? { query: limits.query } : {}
-  return { kind: 'dt', limits: limits.simulate, ...query }
+  if (!limits) return stock('the node is stock algod (it has no simulate limits)')
+  return { kind: 'dt', limits: limits.simulate, ...(limits.query ? { query: limits.query } : {}) }
 }
 
 /** One simulate request per group, as any algod takes them. */
@@ -613,7 +591,7 @@ function gkFromDTOutcome(o: GkDTOutcome, protocolOverride?: GhostkitProtocolOver
  * node allows, and rounds too.
  */
 export function ghostkitDTBackend(algorand: GkAlgorandClient, limits: GhostkitSimulateLimits = GHOSTKIT_DT_DEFAULT_LIMITS): GhostkitBackend {
-  const manager = gkSimulateManager(algorand)
+  const manager = gkForkUtils(algorand)?.simulate
   if (!manager) throw new Error('ghostkit: the dt backend needs the dtalgorand fork of algokit-utils (algorand.simulate)')
   const simulate: GhostkitBackend['simulate'] = async (groups, { round, protocol, ...raw }) => {
     const composers = await Promise.all(groups.map((g) => g(round !== undefined ? gkValidityAt(round) : undefined)))
@@ -748,8 +726,8 @@ export function ghostkitQueryBackend(
   algorand: GkAlgorandClient,
   { limits = GHOSTKIT_DT_DEFAULT_LIMITS, concurrency }: { limits?: GhostkitSimulateLimits; concurrency?: number } = {},
 ): GhostkitBackend {
-  const manager = gkQueryManager(algorand)
-  if (!manager) throw new Error('ghostkit: the query backend needs the dtalgorand forks of algokit-utils and algosdk with queries (algorand.query)')
+  const manager = gkForkUtils(algorand)?.query
+  if (!manager) throw new Error('ghostkit: the query backend needs the dtalgorand fork of algokit-utils (algorand.query)')
   const query = async (groups: GhostkitGroup[], rounds: bigint[], options: GhostkitRequestOptions): Promise<GhostkitRoundOutcome[]> => {
     const signal = options.signal
     if (groups.length === 0) return rounds.map((round) => ({ round, groups: [] }))
@@ -863,21 +841,6 @@ type GkDTManager = {
   ): GkVersionsFeed
 }
 
-const GK_DT_ITERATORS = [
-  'iterateAppVersions',
-  'iterateBoxVersions',
-  'iterateBoxesVersions',
-  'iterateAssetVersions',
-  'iterateAccountVersions',
-  'iterateAccountAssetVersions',
-  'iterateAccountAppVersions',
-] as const
-
-const gkDTManager = (algorand: GkAlgorandClient): GkDTManager | undefined => {
-  const manager = (algorand as unknown as { dt?: Partial<GkDTManager> }).dt
-  return manager && GK_DT_ITERATORS.every((m) => typeof manager[m] === 'function') ? (manager as GkDTManager) : undefined
-}
-
 /** The versions listing of one change source. */
 function gkChangeFeed(dt: GkDTManager, source: GhostkitChangeSource, options: GkVersionsOptions): GkVersionsFeed {
   const s = source as { app?: bigint | number; asset?: bigint | number; account?: string | gkAlgosdk.Address } & {
@@ -914,8 +877,9 @@ function gkChangeFeed(dt: GkDTManager, source: GhostkitChangeSource, options: Gk
  * - The node's versions errors pass through: a listing over the node's time limit (504) or a history it can't serve
  *   (503) isn't retried, so narrow the range. Pages can be short or empty (`key`, `boxPrefix`); they are followed to the end.
  *
- * Needs the dtalgorand fork of algokit-utils (`algorand.dt`, `9.2.3-dt.3.0.0.1` or later) and algosdk (`3.9.0-dt.3.0.0.1`
- * or later for `key` and `boxPrefix`).
+ * Needs the dtalgorand forks of algokit-utils (`algorand.dt`) and algosdk, and a dtalgorand node with time travel
+ * (`getNode()` has `limits.timeTravel`). On stock algod or a node with time travel off, the fork of algokit-utils
+ * rejects the call with dtalgosdk's `DTUnsupportedError` before listing anything.
  *
  * @example
  * const { rounds } = await ghostkitChangeRounds(algorand, [{ app: poolAppId, box: 'stakers' }], { minRound, maxRound })
@@ -926,7 +890,7 @@ export async function ghostkitChangeRounds(
   sources: GhostkitChangeSource[],
   { minRound, maxRound, order = 'asc', limit = 1_000, signal }: GhostkitChangeRoundsOptions = {},
 ): Promise<{ rounds: bigint[]; next?: bigint }> {
-  const dt = gkDTManager(algorand)
+  const dt = gkForkUtils(algorand)?.dt
   if (!dt) throw new Error('ghostkit: change rounds need the dtalgorand fork of algokit-utils (algorand.dt)')
   if (!Number.isInteger(limit) || limit < 1) throw new Error(`ghostkit: limit must be a positive integer, not ${limit}`)
   if (order !== 'asc' && order !== 'desc') throw new Error(`ghostkit: order must be 'asc' or 'desc', not ${order}`)
@@ -1041,10 +1005,6 @@ type GkShared = {
   methods?: Map<string, GkArc56Contract['methods'][number]>
   returnTypes: Map<string, string>
   warned: Set<string>
-  /** the backend `auto` fell back to after the node turned out not to support queries or the extended simulate */
-  fallback?: GhostkitBackend
-  /** why the node rejected querying a program or app (by `gkQueryKey`), which `auto` then simulates */
-  unqueryable: Map<string, string>
 }
 
 type GkTarget = { kind: 'latest' } | { kind: 'round'; round: bigint } | { kind: 'rounds'; rounds: bigint[] }
@@ -1060,7 +1020,6 @@ type GkClientCache = {
   paramsInFlight?: Promise<GkSuggestedParams>
   feeSink?: Promise<string>
   node?: Promise<GhostkitNode>
-  limits?: Promise<GkNodeLimits | undefined>
   /** by reader and round ('latest' for the latest), with when it expires */
   spendable: Map<string, { value: Promise<bigint | undefined>; expires: number }>
 }
@@ -1075,7 +1034,7 @@ const gkCacheOf = (algorand: GkAlgorandClient): GkClientCache => {
   return cache
 }
 /** Caches a promise, forgetting it if it rejects so that the next caller tries again. */
-function gkRemember<K extends 'feeSink' | 'node' | 'limits'>(cache: GkClientCache, key: K, make: () => NonNullable<GkClientCache[K]>) {
+function gkRemember<K extends 'feeSink' | 'node'>(cache: GkClientCache, key: K, make: () => NonNullable<GkClientCache[K]>) {
   const existing = cache[key]
   if (existing) return existing as NonNullable<GkClientCache[K]>
   const made = make()
@@ -1126,7 +1085,7 @@ export class GhostkitBase<TFactory, TClient> {
     this._gkMeta = spec.meta
     this.factory = spec.createFactory(this.algorand, params.readerAccount ?? GK_FALLBACK_READER)
     this.client = spec.createClient(this.factory, params.ghostAppId ?? 13n)
-    this._gkShared = { returnTypes: new Map(), warned: new Set(), unqueryable: new Map() }
+    this._gkShared = { returnTypes: new Map(), warned: new Set() }
   }
 
   /**
@@ -1270,44 +1229,34 @@ export class GhostkitBase<TFactory, TClient> {
     console.warn(`[ghostkit] ${message}`)
   }
 
-  /** The node's limits, as the forced backends read them: cached per AlgorandClient. */
-  private _gkLimits(): Promise<GkNodeLimits | undefined> {
-    return gkRemember(gkCacheOf(this.algorand), 'limits', () => gkFetchLimits(this.algorand))
-  }
-
-  /** The backend for this call. Detection is cached per AlgorandClient, so this costs no request after the first. */
+  /**
+   * The backend for this call, by what `getNode()` found: the forced backends `dt` and `query` throw on a node or
+   * libraries without what they need. Detection is cached per AlgorandClient, so this costs no request after the first.
+   */
   private async _gkResolveBackend(): Promise<GhostkitBackend> {
     const mode = this.backend
     if (typeof mode === 'object') return mode
     if (mode === 'stock') return ghostkitStockBackend(this.algorand)
-    if (mode === 'dt' || mode === 'query') {
-      // forced: trust that the node is a dtalgorand node, even if it doesn't report its limits; a node without queries
-      // makes the query fail
-      const missing = mode === 'dt' ? gkMissingForks(this.algorand) : gkMissingQuery(this.algorand)
-      if (missing) throw new Error(`ghostkit: backend '${mode}' can't be used: ${missing}`)
-      const limits = (await this._gkLimits())?.simulate ?? GHOSTKIT_DT_DEFAULT_LIMITS
-      return mode === 'dt' ? ghostkitDTBackend(this.algorand, limits) : ghostkitQueryBackend(this.algorand, { limits })
-    }
-    if (this._gkShared.fallback) return this._gkShared.fallback
     const node = await this.getNode()
+    if (mode === 'dt' || mode === 'query') {
+      if (node.kind !== 'dt') throw new Error(`ghostkit: backend '${mode}' can't be used: ${node.reason}`)
+      if (mode === 'query' && !node.query) throw new Error("ghostkit: backend 'query' can't be used: the node has queries off")
+    }
     if (node.kind !== 'dt') return ghostkitStockBackend(this.algorand)
-    return node.query ? ghostkitQueryBackend(this.algorand, { limits: node.limits }) : ghostkitDTBackend(this.algorand, node.limits)
+    const query = mode === 'query' || (mode === 'auto' && node.query)
+    return query ? ghostkitQueryBackend(this.algorand, { limits: node.limits }) : ghostkitDTBackend(this.algorand, node.limits)
   }
 
   /** The backend `auto` simulates with when a run can't be queried. */
   private async _gkSimulateBackend(): Promise<GhostkitBackend> {
-    if (this._gkShared.fallback) return this._gkShared.fallback
     const node = await this.getNode()
     return node.kind === 'dt' ? ghostkitDTBackend(this.algorand, node.limits) : ghostkitStockBackend(this.algorand)
   }
 
   /** The query limits for the pre-checks of a run on the query backend. */
   private async _gkQueryLimits(): Promise<GhostkitQueryLimits | undefined> {
-    if (this.backend === 'auto') {
-      const node = await this.getNode()
-      return node.kind === 'dt' ? node.query : undefined
-    }
-    return (await this._gkLimits())?.query
+    const node = await this.getNode()
+    return node.kind === 'dt' ? node.query : undefined
   }
 
   /** The reader: `readerAccount`, or the fee sink, known for MainNet and TestNet and otherwise read from the genesis once. */
@@ -1573,8 +1522,7 @@ export class GhostkitBase<TFactory, TClient> {
 
   /**
    * Runs prepared calls at the target. With `auto`, a run on the query backend goes to simulate when it can't be queried
-   * (`_gkQueryBlocker`) or the node rejects the query (`_gkQueryFallback`); the extended simulate falls back to one
-   * simulate per group if the node turns out not to support it.
+   * (`_gkQueryBlocker`, `_gkQueryFallback`).
    */
   private async _gkRun(
     calls: GkPreparedCall[],
@@ -1592,29 +1540,13 @@ export class GhostkitBase<TFactory, TClient> {
           return await this._gkRunOn(backend, calls, target, options)
         } catch (e) {
           const signal = { ...options, ...calls[0]?.options }.signal
-          const reason = auto && !signal?.aborted ? this._gkQueryFallback(e) : undefined
-          if (!reason) throw e
-          fallback = reason.message
-          if (reason.sticky) this._gkShared.fallback ??= await this._gkSimulateBackend()
+          fallback = auto && !signal?.aborted ? this._gkQueryFallback(e) : undefined
+          if (!fallback) throw e
         }
       }
       backend = await this._gkSimulateBackend()
     }
-    try {
-      return await this._gkRunOn(backend, calls, target, options, fallback)
-    } catch (e) {
-      const name = (e as Error)?.name
-      if (this.backend !== 'auto' || backend.name !== 'dt' || (name !== 'DTUnsupportedError' && name !== 'DTNotAvailableError')) throw e
-      this._gkWarn('dt-fallback', `extended simulate failed (${(e as Error).message}); falling back to one simulate per group`)
-      backend = ghostkitStockBackend(this.algorand)
-      this._gkShared.fallback = backend
-      return this._gkRunOn(backend, calls, target, options, (e as Error).message)
-    }
-  }
-
-  /** What `_gkShared.unqueryable` remembers the node's rejection of this SDK's queries by: the ghost program or the app. */
-  private _gkQueryKey(): string {
-    return this.ghostAppId ? `app ${this.ghostAppId}` : 'ghost'
+    return this._gkRunOn(backend, calls, target, options, fallback)
   }
 
   /** Why a run must be simulated rather than queried, or undefined if it can be queried. */
@@ -1630,8 +1562,6 @@ export class GhostkitBase<TFactory, TClient> {
     if (target.kind === 'rounds' && (merged.validityWindow === 'skip' || merged.validityWindow === null)) {
       return `validityWindow ${merged.validityWindow} needs simulate`
     }
-    const rejected = this._gkShared.unqueryable.get(this._gkQueryKey())
-    if (rejected) return `the node rejected querying this ${this.ghostAppId ? 'app' : 'ghost'} before (${rejected})`
     const limits = await this._gkQueryLimits()
     if (!limits) return undefined
     // simulate pools 700 per app call with the extra budget; a query gives each app call maxCallBudget
@@ -1647,33 +1577,23 @@ export class GhostkitBase<TFactory, TClient> {
   }
 
   /**
-   * Whether `auto` simulates a run whose query failed with `e`, and why; undefined to throw. A group the query backend
-   * can't send and a request the node rejects (400) simulate this run; a node without queries (a load balancer mixing
-   * nodes) makes `auto` simulate from now on (`sticky`).
+   * Why `auto` simulates a run whose query failed with `e`, or undefined to throw. Two failures are only the query's:
+   * a group the query backend can't send, and a round after the node's latest one, which fails a whole query request
+   * (400) but only that round of a simulate. The node's other 400s would fail the simulate too.
    */
-  private _gkQueryFallback(e: unknown): { message: string; sticky?: boolean } | undefined {
+  private _gkQueryFallback(e: unknown): string | undefined {
     const error = e as Error | undefined
-    if (error?.name === GK_QUERY_UNSUPPORTED) return { message: error.message }
-    if (error?.name === 'DTUnsupportedError' || error?.name === 'DTNotAvailableError') {
-      this._gkWarn('query-fallback', `query failed (${error.message}); falling back to the extended simulate`)
-      return { message: error.message, sticky: true }
-    }
+    if (error?.name === GK_QUERY_UNSUPPORTED) return error.message
     if (gkStatus(e) === 400) {
       const message = gkErrorText(e)
-      // the node won't query a program this large (older dtalgod checked the pre-v42 size limit): remember it, for this
-      // SDK instance
-      if (/bytes, more than the \d+ an app may have/.test(message)) this._gkShared.unqueryable.set(this._gkQueryKey(), message)
-      // a round after the latest gives the same results through simulate (a per-round error), so it isn't worth a warning
-      if (!/after the latest round/.test(message)) this._gkWarn('query-400', `the node rejected a query (${message}); simulating instead`)
-      return { message: `the node rejected the query: ${message}` }
+      if (/round \d+ is after the latest round/.test(message)) return `the node rejected the query: ${message}`
     }
     return undefined
   }
 
   /**
-   * What the reader can spend at a round (the latest if undefined) over its minimum balance; undefined if unknown. A node
-   * that can't read the account at the round (a stock node answers with the latest, a dtalgorand node without time travel
-   * fails) gives its latest balance, the best guess.
+   * What the reader can spend at a round (the latest if undefined) over its minimum balance; undefined if unknown. Only a
+   * dtalgorand node with time travel reads accounts at past rounds; other nodes give the latest balance, the best guess.
    */
   private _gkSpendable(round: bigint | undefined): Promise<bigint | undefined> {
     return this._gkReader().then((reader) => this._gkSpendableOf(reader, round))
@@ -1687,26 +1607,20 @@ export class GhostkitBase<TFactory, TClient> {
     if (cached && cached.expires > now) return cached.value
     const entry = { value: Promise.resolve<bigint | undefined>(undefined), expires: now + this.cacheParamsTimeout }
     entry.value = (async () => {
-      const http = (
-        this.algorand.client.algod as unknown as {
-          c: { get(o: { relativePath: string; query?: Record<string, unknown> }): Promise<{ text?: string; body?: Uint8Array }> }
-        }
-      ).c
-      const read = async (query: Record<string, unknown>) => {
-        const res = await http.get({ relativePath: `/v2/accounts/${reader}`, query: { exclude: 'all', ...query } })
-        const account = JSON.parse(res.text ?? new TextDecoder().decode(res.body)) as { round?: number; amount?: number; 'min-balance'?: number }
-        const spendable = BigInt(account.amount ?? 0) - BigInt(account['min-balance'] ?? 0)
+      const node = round !== undefined ? await this.getNode() : undefined
+      const algod = this.algorand.client.algod
+      let account: GkAccountBalance
+      if (round !== undefined && node?.kind === 'dt' && node.limits.timeTravel) {
+        // dtalgosdk checks that the node answered for the round (X-Algod-TT-Round), so a node without time travel behind
+        // the same address (a load balancer) fails here rather than giving its latest balance as the round's
+        account = await gkDTAlgod()!.from(algod).accountInformation(reader).exclude('all').round(round).do()
         // the balance at a past round never changes
-        if (round && account.round !== undefined && BigInt(account.round) === round) entry.expires = Infinity
-        return spendable > 0n ? spendable : 0n
+        entry.expires = Infinity
+      } else {
+        account = await algod.accountInformation(reader).exclude('all').do()
       }
-      try {
-        return await read(round ? { round } : {})
-      } catch (e) {
-        if (!round) throw e
-        this._gkWarn('spendable-round', `couldn't read the reader's balance at past rounds (${(e as Error).message}); using the latest`)
-        return await read({})
-      }
+      const spendable = account.amount - account.minBalance
+      return spendable > 0n ? spendable : 0n
     })().catch((e) => {
       this._gkWarn('spendable', `couldn't read the reader's balance (${(e as Error).message}); paying minimum fees`)
       return undefined

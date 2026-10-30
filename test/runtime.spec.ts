@@ -437,7 +437,7 @@ describe('decoding', () => {
 })
 
 describe('with a stub node', () => {
-  type Route = { status: number; body?: unknown }
+  type Route = { status: number; body?: unknown; headers?: Record<string, string> }
   let server: Server
   /** responses by path; a function gets the query */
   let routes: Record<string, Route | ((query: URLSearchParams) => Route)> = {}
@@ -450,7 +450,7 @@ describe('with a stub node', () => {
       requests.push(`${url.pathname}${url.search}`)
       const r = routes[url.pathname]
       const route = (typeof r === 'function' ? r(url.searchParams) : r) ?? { status: 404, body: { message: 'Not Found' } }
-      res.writeHead(route.status, { 'content-type': 'application/json' })
+      res.writeHead(route.status, { 'content-type': 'application/json', ...route.headers })
       res.end(JSON.stringify(route.body ?? {}))
     })
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
@@ -469,6 +469,7 @@ describe('with a stub node', () => {
       'resource-limit-multiplier': 64,
       'time-travel': true,
       'developer-api': false,
+      'time-limit-seconds': 54,
     }
 
     test.runIf(forkUtils)('reads the limits a dtalgorand node reports', async () => {
@@ -524,14 +525,19 @@ describe('with a stub node', () => {
     })
     /**
      * The reader's balance and minimum balance by round, and at the latest round (999), which a node answers with for
-     * rounds it can't read, as a stock node does.
+     * rounds it can't read, as a stock node does. An answer at a round carries X-Algod-TT-Round, as a dtalgorand node
+     * with time travel sends it, unless `roundHeader` is false.
      */
-    const reader = (byRound: Record<string, [number, number]>) => {
+    const reader = (byRound: Record<string, [number, number]>, { roundHeader = true } = {}) => {
       routes[`/v2/accounts/${READER}`] = (query) => {
         const asked = query.get('round')
         const known = asked !== null && asked in byRound
         const [amount, minBalance] = (known ? byRound[asked] : byRound.latest) ?? [0, 0]
-        return { status: 200, body: { address: READER, round: known ? Number(asked) : 999, amount, 'min-balance': minBalance } }
+        return {
+          status: 200,
+          body: { address: READER, round: known ? Number(asked) : 999, amount, 'min-balance': minBalance },
+          ...(known && roundHeader ? { headers: { 'X-Algod-TT-Round': asked! } } : {}),
+        }
       }
     }
     const accounts = randomAddresses(2)
@@ -564,7 +570,24 @@ describe('with a stub node', () => {
       expect(calls[1].groups[0][0].fee).toBe(5_000n)
     })
 
-    test('reads the balance at each past round on a dtalgorand node, and pays the least that any round can', async () => {
+    /** Serves a dtalgorand node's simulate limits, with time travel on or off. */
+    const dtNode = (timeTravel: boolean) => {
+      routes['/v2/transactions/simulate/limits'] = {
+        status: 200,
+        body: {
+          'max-txn-groups': 16,
+          'max-rounds': 16,
+          'max-extra-opcode-budget': 320000,
+          'resource-limit-multiplier': 1,
+          'time-travel': timeTravel,
+          'developer-api': false,
+          'time-limit-seconds': 54,
+        },
+      }
+    }
+
+    test.runIf(forkUtils)('reads the balance at each past round on a node with time travel, and pays the least that any round can', async () => {
+      dtNode(true)
       reader({ '10': [5_000_000, 100_000], '20': [0, 0], '30': [50_000_000, 100_000] })
       const { sdk, calls } = sdkOn(GhostV11SDK, fakeBackend({ name: 'dt', limits: GHOSTKIT_DT_DEFAULT_LIMITS }))
       await sdk.atRounds([10, 20, 30], (s) => s.acctBalanceData({ methodArgsOrArgsArray: { accounts } }))
@@ -575,37 +598,62 @@ describe('with a stub node', () => {
       )
     })
 
-    test("reads the balance at a pinned round, or the latest if the node can't", async () => {
+    test.runIf(forkUtils)('keeps the balance at a past round for good on a node with time travel', async () => {
+      dtNode(true)
       reader({ '5': [1_000_000, 100_000], latest: [50_000_000, 100_000] })
       const { sdk, calls } = sdkOn(GhostV11SDK)
       await sdk.atRound(5).acctBalanceData({ methodArgsOrArgsArray: { accounts } })
-      await sdk.atRound(6).acctBalanceData({ methodArgsOrArgsArray: { accounts } })
-      expect(calls.map((c) => c.groups[0][0].fee)).toEqual([800_000n, 49_800_000n])
-      // round 5's balance is kept; round 6's answer was the latest balance, which isn't
       reader({ '5': [2_000_000, 100_000], latest: [60_000_000, 100_000] })
       await sdk.atRound(5).acctBalanceData({ methodArgsOrArgsArray: { accounts } })
-      await sdk.atRound(6).acctBalanceData({ methodArgsOrArgsArray: { accounts } })
-      expect(calls.slice(2).map((c) => c.groups[0][0].fee)).toEqual([800_000n, 59_800_000n])
+      expect(calls.map((c) => c.groups[0][0].fee)).toEqual([800_000n, 800_000n])
+      expect(requests.filter((r) => r.startsWith('/v2/accounts'))).toEqual([`/v2/accounts/${READER}?exclude=all&round=5`])
     })
 
-    test.runIf(forkUtils)("falls back to the latest balance at once when the node doesn't serve the round's history", async () => {
+    test('reads the latest balance for a past round on a node without time travel, cached like suggested params', async () => {
+      // stock algod (no limits), or a dtalgorand node with time travel off
+      for (const timeTravelOff of forkUtils ? [false, true] : [false]) {
+        routes = {}
+        requests = []
+        if (timeTravelOff) dtNode(false)
+        reader({ '5': [1_000_000, 100_000], latest: [50_000_000, 100_000] })
+        const { sdk, calls } = sdkOn(GhostV11SDK)
+        await sdk.atRound(5).acctBalanceData({ methodArgsOrArgsArray: { accounts } })
+        reader({ '5': [1_000_000, 100_000], latest: [60_000_000, 100_000] })
+        await sdk.atRound(5).acctBalanceData({ methodArgsOrArgsArray: { accounts } })
+        // cacheParamsTimeout is 0: the latest balance is read again
+        expect(calls.map((c) => c.groups[0][0].fee)).toEqual([49_800_000n, 59_800_000n])
+        expect(requests.filter((r) => r.startsWith('/v2/accounts'))).toEqual([`/v2/accounts/${READER}?exclude=all`, `/v2/accounts/${READER}?exclude=all`])
+      }
+    })
+
+    test.runIf(forkUtils)('pays the minimum fee when an answer at a past round lacks X-Algod-TT-Round', async () => {
+      // e.g. a load balancer that also sends requests to a node without time travel, which ignores `round`
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
       try {
-        routes[`/v2/accounts/${READER}`] = (query) =>
-          query.get('round') !== null
-            ? { status: 503, body: { message: 'the time travel history is not served' } }
-            : { status: 200, body: { address: READER, round: 999, amount: 10_000_000, 'min-balance': 100_000 } }
+        dtNode(true)
+        reader({ '5': [1_000_000, 100_000], latest: [50_000_000, 100_000] }, { roundHeader: false })
+        const { sdk, calls } = sdkOn(GhostV11SDK)
+        await sdk.atRound(5).acctBalanceData({ methodArgsOrArgsArray: { accounts } })
+        expect(calls[0].groups[0][0].fee).toBe(1_000n)
+        expect(warn.mock.calls.filter(([m]) => /couldn't read the reader's balance .*x-algod-tt-round/i.test(String(m)))).toHaveLength(1)
+      } finally {
+        warn.mockRestore()
+      }
+    })
+
+    test.runIf(forkUtils)("pays the minimum fee when the node doesn't serve the round's history", async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      try {
+        dtNode(true)
+        routes[`/v2/accounts/${READER}`] = { status: 503, body: { message: 'the time travel history is not served' } }
         const { sdk, calls } = sdkOn(GhostV11SDK, fakeBackend({ name: 'dt', limits: GHOSTKIT_DT_DEFAULT_LIMITS }))
         const start = performance.now()
         await sdk.atRound(5).acctBalanceData({ methodArgsOrArgsArray: { accounts } })
         // the fork of algokit-utils throws a history-unavailable 503 at once, rather than retrying it for seconds
         expect(performance.now() - start).toBeLessThan(1_000)
-        expect(requests.filter((r) => r.startsWith('/v2/accounts'))).toEqual([
-          `/v2/accounts/${READER}?exclude=all&round=5`,
-          `/v2/accounts/${READER}?exclude=all`,
-        ])
-        expect(calls[0].groups[0][0].fee).toBe(9_800_000n)
-        expect(warn.mock.calls.filter(([m]) => /couldn't read the reader's balance at past rounds/.test(String(m)))).toHaveLength(1)
+        expect(requests.filter((r) => r.startsWith('/v2/accounts'))).toEqual([`/v2/accounts/${READER}?exclude=all&round=5`])
+        expect(calls[0].groups[0][0].fee).toBe(1_000n)
+        expect(warn.mock.calls.filter(([m]) => /couldn't read the reader's balance/.test(String(m)))).toHaveLength(1)
       } finally {
         warn.mockRestore()
       }
@@ -640,8 +688,16 @@ describe('with a stub node', () => {
       'resource-limit-multiplier': 128,
       'time-travel': true,
       'developer-api': false,
+      'time-limit-seconds': 54,
     }
-    const queryLimits = { 'max-calls': 1024, 'max-call-budget': 320000, 'max-call-log-bytes': 65536, 'max-response-bytes': 0, 'max-rounds': 16 }
+    const queryLimits = {
+      'max-calls': 1024,
+      'max-call-budget': 320000,
+      'max-call-log-bytes': 65536,
+      'max-call-state-bytes': 67108864,
+      'max-response-bytes': 0,
+      'max-rounds': 16,
+    }
     /** Serves the simulate limits, with these query limits (none for null). */
     const serve = (query: Record<string, number> | null = queryLimits) => {
       routes['/v2/transactions/simulate/limits'] = { status: 200, body: { ...simulateLimits, ...(query ? { query } : {}) } }
@@ -664,7 +720,7 @@ describe('with a stub node', () => {
       expect(node).toEqual({
         kind: 'dt',
         limits: { maxTxnGroups: 16, maxRounds: 16, maxExtraOpcodeBudget: 640000, resourceLimitMultiplier: 128, timeTravel: true, developerApi: false },
-        query: { maxCalls: 1024, maxRounds: 16, maxCallBudget: 320000, maxCallLogBytes: 65536, maxResponseBytes: 0 },
+        query: { maxCalls: 1024, maxRounds: 16, maxCallBudget: 320000, maxCallLogBytes: 65536, maxCallStateBytes: 67108864, maxResponseBytes: 0 },
       })
       serve(null)
       expect((await ghostkitDetectNode(offlineAlgorand(port()))) as { query?: unknown }).not.toHaveProperty('query')
@@ -787,22 +843,10 @@ describe('with a stub node', () => {
       expect(simulated.requests).toHaveLength(1)
     })
 
-    test('simulates a run the node rejects (400), and remembers a program it rejects', async () => {
+    test("simulates a run at a round after the node's latest, and throws the node's other rejections", async () => {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
       try {
-        routes['/v2/query'] = { status: 400, body: { message: 'program and clear-program are 9007 bytes, more than the 8192 an app may have' } }
-        const algorand = offlineAlgorand(port())
-        const sdk = new GhostBigSDK({ algorand, readerAccount: READER, ghostFee: 0, cacheParamsTimeout: 0 })
-        const simulated = fakeSimulate(algorand)
-        const run = vi.spyOn((algorand as unknown as { query: { run: () => Promise<unknown> } }).query, 'run')
-        expect(await sdk.acctBalanceData({ methodArgsOrArgsArray: { accounts: randomAddresses(2) } })).toHaveLength(2)
-        expect(await sdk.acctBalanceData({ methodArgsOrArgsArray: { accounts: randomAddresses(2) } })).toHaveLength(2)
-        expect(run).toHaveBeenCalledTimes(1)
-        expect(simulated.requests).toHaveLength(2)
-        expect(warn.mock.calls.filter(([m]) => /the node rejected a query/.test(String(m)))).toHaveLength(1)
-
-        // a round after the latest is about the round: the next run queries again, and simulate says the same, silently
-        warn.mockClear()
+        // a whole query request fails for a round after the latest; a simulate fails only that round, silently
         routes['/v2/query'] = { status: 400, body: { message: 'round 2000 is after the latest round 1000' } }
         const v11 = setup(GhostV11SDK, { readerAccount: READER, ghostFee: 0 })
         v11.spy.mockRestore()
@@ -812,22 +856,38 @@ describe('with a stub node', () => {
         expect(queried).toHaveBeenCalledTimes(2)
         expect(v11.simulated.requests).toHaveLength(2)
         expect(warn).not.toHaveBeenCalled()
+
+        // a program larger than any protocol allows can't be simulated either
+        routes['/v2/query'] = { status: 400, body: { message: 'program and clear-program are 9007 bytes, more than the 8192 an app may have' } }
+        const algorand = offlineAlgorand(port())
+        const sdk = new GhostBigSDK({ algorand, readerAccount: READER, ghostFee: 0, cacheParamsTimeout: 0 })
+        const simulated = fakeSimulate(algorand)
+        await expect(sdk.acctBalanceData({ methodArgsOrArgsArray: { accounts: randomAddresses(2) } })).rejects.toThrow(/more than the 8192 an app may have/)
+        expect(simulated.requests).toHaveLength(0)
       } finally {
         warn.mockRestore()
       }
     })
 
-    test('falls back to the extended simulate for good when the node has no queries after all', async () => {
-      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
-      try {
-        const { sdk, spy, simulated } = setup(GhostV11SDK, { readerAccount: READER, ghostFee: 0 })
-        spy.mockRejectedValue(Object.assign(new Error('The node has no query endpoint'), { name: 'DTUnsupportedError' }))
-        await blk(sdk)
-        await blk(sdk)
-        expect(spy).toHaveBeenCalledTimes(1)
-        expect(simulated.requests).toHaveLength(2)
-      } finally {
-        warn.mockRestore()
+    test('a query the node turns down after reporting queries is thrown, not simulated', async () => {
+      const { sdk, spy, simulated } = setup(GhostV11SDK, { readerAccount: READER, ghostFee: 0 })
+      spy.mockRejectedValue(Object.assign(new Error('query is disabled on this node (MaxAPIQueryCalls is 0)'), { name: 'DTUnsupportedError' }))
+      await expect(blk(sdk)).rejects.toThrow(/query is disabled/)
+      expect(simulated.requests).toHaveLength(0)
+    })
+
+    test("backend 'query' throws on a node with queries off, and 'dt' and 'query' on stock algod", async () => {
+      serve(null)
+      const { sdk, runs, simulated } = setup(GhostV11SDK, { readerAccount: READER, ghostFee: 0, backend: 'query' })
+      await expect(blk(sdk)).rejects.toThrow(/backend 'query' can't be used: the node has queries off/)
+      sdk.backend = 'dt'
+      await blk(sdk)
+      expect(runs).toHaveLength(0)
+      expect(simulated.requests).toHaveLength(1)
+      delete routes['/v2/transactions/simulate/limits']
+      for (const backend of ['dt', 'query'] as const) {
+        const stock = setup(GhostV11SDK, { readerAccount: READER, ghostFee: 0, backend })
+        await expect(blk(stock.sdk)).rejects.toThrow(new RegExp(`backend '${backend}' can't be used: the node is stock algod`))
       }
     })
 
@@ -1095,5 +1155,16 @@ describe('ghostkitChangeRounds', () => {
 
   test.runIf(!forkUtils)('needs the fork of algokit-utils', async () => {
     await expect(ghostkitChangeRounds(offlineAlgorand(), [{ app: 1 }])).rejects.toThrow(/need the dtalgorand fork of algokit-utils/)
+  })
+})
+
+describe.runIf(forkUtils)('the dtalgorand forks', () => {
+  test('the installed dtalgosdk has every DTAlgodClient feature the installed algokit-utils requires', async () => {
+    // a mismatched pair (re-vendoring one without the other) makes algokit-utils take dtalgosdk for stock algosdk
+    const { REQUIRED_DT_FEATURES } = (await import('@algorandfoundation/algokit-utils/types/dt-support')) as unknown as {
+      REQUIRED_DT_FEATURES: readonly string[]
+    }
+    const features = (algosdk as unknown as { DTAlgodClient: { features: readonly string[] } }).DTAlgodClient.features
+    expect(REQUIRED_DT_FEATURES.filter((f) => !features.includes(f))).toEqual([])
   })
 })
