@@ -10,16 +10,10 @@
       "description": "## What changed\n\nThe generated SDK used to build one group per call and simulate it with `composer.simulate`. Now it:\n\n- runs on stock algokit-utils/algosdk and on the dtalgorand forks, picking a **backend** at runtime\n- reads **past rounds** (`atRound`, `atRounds`) and **batches** calls (`batch`)\n- **chunks** large array inputs to the node's limits\n- handles **consensus v42 / AVM 13**: larger programs and args, usage-based fees, protocol overrides for old rounds\n- **caches** what it learns about the node, shared by every ghostkit SDK on an AlgorandClient\n- sends ghost calls as read-only **queries** (`POST /v2/query`) on a dtalgorand node that has them, with simulate as the fallback\n\nThis section of the README has the stock/dtalgorand matrix. The tour follows the code from the generator to the runtime, then the tests."
     },
     {
-      "title": "Vendored forks",
+      "title": "The forks",
       "file": "package.json",
       "line": 39,
-      "description": "## Dependencies\n\nThe dtalgorand forks of algokit-utils (`@d13co/dt-algokit-utils` `9.2.3-dt.4.1.0.0`) and algosdk (`dtalgosdk` `3.9.0-dt.4.1.0.0`) are vendored as tarballs in `vendor/` until they're published, installed under the stock names. Ghostkit supports only the current dtalgorand release, and these are its forks.\n\nStock algokit-utils 9.2.2 is installed alongside as `algokit-utils-stock`, so every suite runs against both (see the vitest config later). There is one algosdk copy, the fork, which is a superset of stock."
-    },
-    {
-      "title": "legacy-peer-deps",
-      "file": ".npmrc",
-      "line": 2,
-      "description": "Prerelease versions like `3.9.0-dt.4.1.0.0` never satisfy `^x.y.z` peer ranges, and npm's resolver crashes on `file:` overrides of direct dependencies. `legacy-peer-deps` installs the forks as they are. `.npmrc` was removed from `.gitignore` for this.\n\nProjects that use the forks hit the same issue: the README says to use this setting or pnpm overrides."
+      "description": "## Dependencies\n\nThe dtalgorand forks of algokit-utils (`@d13co/dt-algokit-utils` `9.2.3-dt.4.1.0.0`) and algosdk (`dt-algosdk` `3.9.0-dt.4.1.0.0`) come from npm, installed under the stock names and pinned exactly; `overrides` makes the whole tree use them, so peer ranges are satisfied without `legacy-peer-deps`. Ghostkit supports only the current dtalgorand release, and these are its forks.\n\nStock algokit-utils 9.2.2 is installed alongside as `algokit-utils-stock`, so every suite runs against both (see the vitest config later). There is one algosdk copy, the fork, which is a superset of stock."
     },
     {
       "title": "Scripts",
@@ -211,7 +205,7 @@
       "title": "ghostFee 'max'",
       "file": "src/templates/runtime.ts",
       "line": 1608,
-      "description": "The reader's spendable balance. On a node with time travel it's read at the simulated round, through dtalgosdk, which checks the node answered for that round (`X-Algod-TT-Round`), and cached for good. Other nodes give the latest balance. If the read fails, the call pays the minimum fee and warns. With `atRounds`, the fee is the least the reader can spend at any round. This is opt-in, since it costs a request."
+      "description": "The reader's spendable balance. On a node with time travel it's read at the simulated round, through dt-algosdk, which checks the node answered for that round (`X-Algod-TT-Round`), and cached for good. Other nodes give the latest balance. If the read fails, the call pays the minimum fee and warns. With `atRounds`, the fee is the least the reader can spend at any round. This is opt-in, since it costs a request."
     },
     {
       "file": "src/templates/runtime.ts",

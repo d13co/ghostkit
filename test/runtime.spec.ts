@@ -1150,8 +1150,8 @@ describe('ghostkitChangeRounds', () => {
 })
 
 describe.runIf(forkUtils)('the dtalgorand forks', () => {
-  test('the installed dtalgosdk has every DTAlgodClient feature the installed algokit-utils requires', async () => {
-    // a mismatched pair (re-vendoring one without the other) makes algokit-utils take dtalgosdk for stock algosdk
+  test('the installed dt-algosdk has every DTAlgodClient feature the installed algokit-utils requires', async () => {
+    // a mismatched pair (re-vendoring one without the other) makes algokit-utils take dt-algosdk for stock algosdk
     const { REQUIRED_DT_FEATURES } = (await import('@algorandfoundation/algokit-utils/types/dt-support')) as unknown as {
       REQUIRED_DT_FEATURES: readonly string[]
     }

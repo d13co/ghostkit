@@ -370,7 +370,7 @@ export type GhostkitChangeRoundsOptions = {
  *
  * Needs the dtalgorand forks of algokit-utils (`algorand.dt`) and algosdk, and a dtalgorand node with time travel
  * (`getNode()` has `limits.timeTravel`). On stock algod or a node with time travel off, the fork of algokit-utils
- * rejects the call with dtalgosdk's `DTUnsupportedError` before listing anything.
+ * rejects the call with dt-algosdk's `DTUnsupportedError` before listing anything.
  *
  * @example
  * const { rounds } = await ghostkitChangeRounds(algorand, [{ app: poolAppId, box: 'stakers' }], { minRound, maxRound })

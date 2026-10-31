@@ -402,7 +402,7 @@ type GkQueryManager = {
   ): Promise<{ round: bigint; protocolOverride?: GhostkitProtocolOverride; calls: GkQueryCallOutcome[] }[]>
 }
 
-/** `DTAlgodClient` of dtalgosdk, the dtalgorand fork of algosdk, as far as ghostkit uses it. */
+/** `DTAlgodClient` of dt-algosdk, the dtalgorand fork of algosdk, as far as ghostkit uses it. */
 type GkDTAlgodClass = {
   features: readonly string[]
   from(algod: unknown): {
@@ -422,8 +422,8 @@ type GkCapabilities = {
 }
 
 /**
- * `DTAlgodClient` if the loaded algosdk is dtalgosdk, else undefined. Its `features` describe the SDK build, not the
- * node: they only tell dtalgosdk from stock algosdk here.
+ * `DTAlgodClient` if the loaded algosdk is dt-algosdk, else undefined. Its `features` describe the SDK build, not the
+ * node: they only tell dt-algosdk from stock algosdk here.
  */
 const gkDTAlgod = (): GkDTAlgodClass | undefined => {
   const dt = (gkAlgosdk as unknown as { DTAlgodClient?: Partial<GkDTAlgodClass> }).DTAlgodClient
@@ -490,7 +490,7 @@ type GkNodeLimits = { simulate: GhostkitSimulateLimits; query?: GhostkitQueryLim
 
 /**
  * A dtalgorand node's limits, or `undefined` for stock algod, the only node without them. They come from the node's
- * capabilities (`DTAlgodClient.capabilities()`), which dtalgosdk caches per algod client and the fork of algokit-utils
+ * capabilities (`DTAlgodClient.capabilities()`), which dt-algosdk caches per algod client and the fork of algokit-utils
  * reads before each extended simulate and query, so the node is asked once.
  */
 async function gkFetchLimits(algorand: GkAlgorandClient): Promise<GkNodeLimits | undefined> {
@@ -526,7 +526,7 @@ async function gkFetchLimits(algorand: GkAlgorandClient): Promise<GkNodeLimits |
 /** Why the loaded libraries can't use a dtalgorand node's extensions, or undefined if they can. */
 function gkMissingForks(algorand: GkAlgorandClient): string | undefined {
   if (!gkForkUtils(algorand)) return 'the loaded algokit-utils is not the dtalgorand fork'
-  if (!gkDTAlgod()) return 'the loaded algosdk is not the dtalgorand fork (dtalgosdk)'
+  if (!gkDTAlgod()) return 'the loaded algosdk is not the dtalgorand fork (dt-algosdk)'
   return undefined
 }
 
@@ -885,7 +885,7 @@ function gkChangeFeed(dt: GkDTManager, source: GhostkitChangeSource, options: Gk
  *
  * Needs the dtalgorand forks of algokit-utils (`algorand.dt`) and algosdk, and a dtalgorand node with time travel
  * (`getNode()` has `limits.timeTravel`). On stock algod or a node with time travel off, the fork of algokit-utils
- * rejects the call with dtalgosdk's `DTUnsupportedError` before listing anything.
+ * rejects the call with dt-algosdk's `DTUnsupportedError` before listing anything.
  *
  * @example
  * const { rounds } = await ghostkitChangeRounds(algorand, [{ app: poolAppId, box: 'stakers' }], { minRound, maxRound })
@@ -1617,7 +1617,7 @@ export class GhostkitBase<TFactory, TClient> {
       const algod = this.algorand.client.algod
       let account: GkAccountBalance
       if (round !== undefined && node?.kind === 'dt' && node.limits.timeTravel) {
-        // dtalgosdk checks that the node answered for the round (X-Algod-TT-Round), so a node without time travel behind
+        // dt-algosdk checks that the node answered for the round (X-Algod-TT-Round), so a node without time travel behind
         // the same address (a load balancer) fails here rather than giving its latest balance as the round's
         account = await gkDTAlgod()!.from(algod).accountInformation(reader).exclude('all').round(round).do()
         // the balance at a past round never changes

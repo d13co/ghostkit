@@ -155,8 +155,8 @@ const GK_MORE_LOGGING_BYTES = 65536;
 const GK_APP_CALL_BUDGET = 700;
 const gkEmptySigner = gkAlgosdk.makeEmptyTransactionSigner();
 /**
- * `DTAlgodClient` if the loaded algosdk is dtalgosdk, else undefined. Its `features` describe the SDK build, not the
- * node: they only tell dtalgosdk from stock algosdk here.
+ * `DTAlgodClient` if the loaded algosdk is dt-algosdk, else undefined. Its `features` describe the SDK build, not the
+ * node: they only tell dt-algosdk from stock algosdk here.
  */
 const gkDTAlgod = () => {
     const dt = gkAlgosdk.DTAlgodClient;
@@ -212,7 +212,7 @@ function gkThrowIfAborted(signal) {
 const gkValidityAt = (round) => ({ firstValidRound: round + 1n, lastValidRound: round + 1n });
 /**
  * A dtalgorand node's limits, or `undefined` for stock algod, the only node without them. They come from the node's
- * capabilities (`DTAlgodClient.capabilities()`), which dtalgosdk caches per algod client and the fork of algokit-utils
+ * capabilities (`DTAlgodClient.capabilities()`), which dt-algosdk caches per algod client and the fork of algokit-utils
  * reads before each extended simulate and query, so the node is asked once.
  */
 async function gkFetchLimits(algorand) {
@@ -251,7 +251,7 @@ function gkMissingForks(algorand) {
     if (!gkForkUtils(algorand))
         return 'the loaded algokit-utils is not the dtalgorand fork';
     if (!gkDTAlgod())
-        return 'the loaded algosdk is not the dtalgorand fork (dtalgosdk)';
+        return 'the loaded algosdk is not the dtalgorand fork (dt-algosdk)';
     return undefined;
 }
 /**
@@ -550,7 +550,7 @@ function gkChangeFeed(dt, source, options) {
  *
  * Needs the dtalgorand forks of algokit-utils (`algorand.dt`) and algosdk, and a dtalgorand node with time travel
  * (`getNode()` has `limits.timeTravel`). On stock algod or a node with time travel off, the fork of algokit-utils
- * rejects the call with dtalgosdk's `DTUnsupportedError` before listing anything.
+ * rejects the call with dt-algosdk's `DTUnsupportedError` before listing anything.
  *
  * @example
  * const { rounds } = await ghostkitChangeRounds(algorand, [{ app: poolAppId, box: 'stakers' }], { minRound, maxRound })
@@ -1191,7 +1191,7 @@ class GhostkitBase {
             const algod = this.algorand.client.algod;
             let account;
             if (round !== undefined && node?.kind === 'dt' && node.limits.timeTravel) {
-                // dtalgosdk checks that the node answered for the round (X-Algod-TT-Round), so a node without time travel behind
+                // dt-algosdk checks that the node answered for the round (X-Algod-TT-Round), so a node without time travel behind
                 // the same address (a load balancer) fails here rather than giving its latest balance as the round's
                 account = await gkDTAlgod().from(algod).accountInformation(reader).exclude('all').round(round).do();
                 // the balance at a past round never changes
