@@ -83,6 +83,11 @@ export type GhostkitQueryLimits = {
     maxCalls: number;
     /** Most rounds per query request. */
     maxRounds: number;
+    /**
+     * Most calls times rounds per query request (1,024 by default: 1,024 calls at one round, or 64 at 16 rounds);
+     * `maxCalls × maxRounds` on a node from before this limit.
+     */
+    maxTotalCalls: number;
     /** The most opcode budget of each call, which each call gets by default. */
     maxCallBudget: number;
     /** The most log bytes of each call; 0 for the consensus limits (1,024 bytes, 32 logs). */
@@ -472,7 +477,8 @@ export declare class GhostkitBase<TFactory, TClient> {
      * promises (one, or an array) without awaiting them.
      *
      * On a dtalgorand node the rounds and calls go in as few requests as its limits allow, rounds any distance apart (with
-     * queries, one request per up to `maxCalls` app calls × `maxRounds` rounds, 1,024 × 16 by default); on a stock node
+     * queries, one request per up to `maxCalls` app calls and `maxRounds` rounds, at most `maxTotalCalls` app calls ×
+     * rounds: by default 1,024 app calls at one round, or 64 at 16 rounds); on a stock node
      * each call is simulated at each round on its own, and only the last few rounds are available.
      *
      * @example
@@ -482,7 +488,7 @@ export declare class GhostkitBase<TFactory, TClient> {
     atRounds<const T extends Promise<unknown> | readonly Promise<unknown>[]>(rounds: GhostkitRound[], fn: (sdk: this) => T, options?: GhostkitRoundsOptions): Promise<GhostkitRoundResult<GkAwaitedAll<T>>[]>;
     /**
      * Simulates the calls `fn` makes together: on a dtalgorand node in one request (or as few as its limits allow; with
-     * queries, up to `maxCalls` app calls per request, 1,024 by default), on a stock node one request per call,
+     * queries, up to `maxCalls` and `maxTotalCalls` app calls per request, 1,024 by default), on a stock node one request per call,
      * concurrently. `fn` must return the calls' promises (one, or an array) without
      * awaiting them. Rejects with the first failed call's error.
      *
@@ -541,9 +547,10 @@ export declare class GhostkitBase<TFactory, TClient> {
     /** Why a run must be simulated rather than queried, or undefined if it can be queried. */
     private _gkQueryBlocker;
     /**
-     * Why `auto` simulates a run whose query failed with `e`, or undefined to throw. Two failures are only the query's:
-     * a group the query backend can't send, and a round after the node's latest one, which fails a whole query request
-     * (400) but only that round of a simulate. The node's other 400s would fail the simulate too.
+     * Why `auto` simulates a run whose query failed with `e`, or undefined to throw. Three failures are only the query's:
+     * a group the query backend can't send; a round after the node's latest one, which fails a whole query request (400)
+     * but only that round of a simulate; and too many calls times rounds in a request (400), which an algokit-utils
+     * from before `maxTotalCalls` sends to a node that has it. The node's other 400s would fail the simulate too.
      */
     private _gkQueryFallback;
     /**

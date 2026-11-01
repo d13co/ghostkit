@@ -237,6 +237,8 @@ async function gkFetchLimits(algorand) {
                 query: {
                     maxCalls: q.maxCalls,
                     maxRounds: q.maxRounds,
+                    // A node from before this limit has only its calls and rounds limits
+                    maxTotalCalls: q.maxTotalCalls || q.maxCalls * q.maxRounds,
                     maxCallBudget: q.maxCallBudget,
                     maxCallLogBytes: q.maxCallLogBytes,
                     maxCallStateBytes: q.maxCallStateBytes,
@@ -695,7 +697,8 @@ class GhostkitBase {
      * promises (one, or an array) without awaiting them.
      *
      * On a dtalgorand node the rounds and calls go in as few requests as its limits allow, rounds any distance apart (with
-     * queries, one request per up to `maxCalls` app calls × `maxRounds` rounds, 1,024 × 16 by default); on a stock node
+     * queries, one request per up to `maxCalls` app calls and `maxRounds` rounds, at most `maxTotalCalls` app calls ×
+     * rounds: by default 1,024 app calls at one round, or 64 at 16 rounds); on a stock node
      * each call is simulated at each round on its own, and only the last few rounds are available.
      *
      * @example
@@ -720,7 +723,7 @@ class GhostkitBase {
     }
     /**
      * Simulates the calls `fn` makes together: on a dtalgorand node in one request (or as few as its limits allow; with
-     * queries, up to `maxCalls` app calls per request, 1,024 by default), on a stock node one request per call,
+     * queries, up to `maxCalls` and `maxTotalCalls` app calls per request, 1,024 by default), on a stock node one request per call,
      * concurrently. `fn` must return the calls' promises (one, or an array) without
      * awaiting them. Rejects with the first failed call's error.
      *
@@ -1156,9 +1159,10 @@ class GhostkitBase {
         return undefined;
     }
     /**
-     * Why `auto` simulates a run whose query failed with `e`, or undefined to throw. Two failures are only the query's:
-     * a group the query backend can't send, and a round after the node's latest one, which fails a whole query request
-     * (400) but only that round of a simulate. The node's other 400s would fail the simulate too.
+     * Why `auto` simulates a run whose query failed with `e`, or undefined to throw. Three failures are only the query's:
+     * a group the query backend can't send; a round after the node's latest one, which fails a whole query request (400)
+     * but only that round of a simulate; and too many calls times rounds in a request (400), which an algokit-utils
+     * from before `maxTotalCalls` sends to a node that has it. The node's other 400s would fail the simulate too.
      */
     _gkQueryFallback(e) {
         const error = e;
@@ -1166,7 +1170,7 @@ class GhostkitBase {
             return error.message;
         if (gkStatus(e) === 400) {
             const message = gkErrorText(e);
-            if (/round \d+ is after the latest round/.test(message))
+            if (/round \d+ is after the latest round/.test(message) || /too many calls in total/.test(message))
                 return `the node rejected the query: ${message}`;
         }
         return undefined;

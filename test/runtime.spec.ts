@@ -711,10 +711,42 @@ describe('with a stub node', () => {
       expect(node).toEqual({
         kind: 'dt',
         limits: { maxTxnGroups: 16, maxRounds: 16, maxExtraOpcodeBudget: 640000, resourceLimitMultiplier: 128, timeTravel: true, developerApi: false },
-        query: { maxCalls: 1024, maxRounds: 16, maxCallBudget: 320000, maxCallLogBytes: 65536, maxCallStateBytes: 67108864, maxResponseBytes: 0 },
+        query: {
+          maxCalls: 1024,
+          maxRounds: 16,
+          maxTotalCalls: 1024 * 16,
+          maxCallBudget: 320000,
+          maxCallLogBytes: 65536,
+          maxCallStateBytes: 67108864,
+          maxResponseBytes: 0,
+        },
       })
+      // A node that reports its total
+      serve({ ...queryLimits, 'max-total-calls': 1024 })
+      expect((await ghostkitDetectNode(offlineAlgorand(port()))) as { query?: unknown }).toMatchObject({ query: { maxTotalCalls: 1024 } })
+      // A reported 0 is taken as absent
+      serve({ ...queryLimits, 'max-total-calls': 0 })
+      expect((await ghostkitDetectNode(offlineAlgorand(port()))) as { query?: unknown }).toMatchObject({ query: { maxTotalCalls: 1024 * 16 } })
       serve(null)
       expect((await ghostkitDetectNode(offlineAlgorand(port()))) as { query?: unknown }).not.toHaveProperty('query')
+    })
+
+    test('an older dt-algosdk without maxTotalCalls: maxCalls × maxRounds', async () => {
+      type Dt = { prototype: { capabilities(): Promise<{ query?: Record<string, number> }> } }
+      const Client = (algosdk as unknown as { DTAlgodClient: Dt }).DTAlgodClient
+      const real = Client.prototype.capabilities
+      const spy = vi.spyOn(Client.prototype, 'capabilities').mockImplementation(async function (this: unknown) {
+        const caps = await real.call(this)
+        const { maxTotalCalls: _maxTotalCalls, ...query } = caps.query!
+        return { ...caps, query }
+      })
+      try {
+        serve({ ...queryLimits, 'max-total-calls': 1024 })
+        const node = await ghostkitDetectNode(offlineAlgorand(port()))
+        expect(node).toMatchObject({ query: { maxCalls: 1024, maxRounds: 16, maxTotalCalls: 1024 * 16 } })
+      } finally {
+        spy.mockRestore()
+      }
     })
 
     test('queries the ghost program at the latest round, with no params, fee sink or balance requests', async () => {
@@ -846,6 +878,16 @@ describe('with a stub node', () => {
         await blk(v11.sdk.atRound(2000))
         expect(queried).toHaveBeenCalledTimes(2)
         expect(v11.simulated.requests).toHaveLength(2)
+        expect(warn).not.toHaveBeenCalled()
+
+        // a request over the node's calls times rounds, from an algokit-utils that doesn't split by them
+        routes['/v2/query'] = {
+          status: 400,
+          body: { message: 'too many calls in total: 1024 calls at 2 rounds is 2048, the limit is 1024 (MaxAPIQueryTotalCalls)' },
+        }
+        await blk(v11.sdk.atRound(2001))
+        expect(queried).toHaveBeenCalledTimes(3)
+        expect(v11.simulated.requests).toHaveLength(3)
         expect(warn).not.toHaveBeenCalled()
 
         // a program larger than any protocol allows can't be simulated either
