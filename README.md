@@ -460,26 +460,30 @@ To install ghostkit on your own project, you must currently use the alpha channe
 npm i ghostkit@alpha
 ```
 
-To use the dtalgorand forks in your project, install them from npm under the stock names, pinned exactly, and override them across the whole dependency tree so that your project loads one copy of each: `@d13co/dt-algokit-utils` `9.2.3-dt.4.1.0.0` and `dt-algosdk` `3.9.0-dt.4.1.0.0`. Ghostkit supports the current dtalgorand release only, not nodes or forks of earlier ones.
+To use the dtalgorand forks in your project, install them under the stock names, pinned exactly, and override them across the whole dependency tree so that your project loads one copy of each: `@d13co/dt-algokit-utils` `9.2.3-dt.5.2.0.0` and `dt-algosdk` `3.9.0-dt.5.2.0.0`, for dtalgorand dt5 (`v5.0.5-dt5`). Ghostkit supports the current dtalgorand release only, not nodes or forks of earlier ones.
+
+Until these versions are on npm, install them from tarballs in your project (ghostkit's are in its `vendor/`):
 
 ```json
 {
   "dependencies": {
-    "@algorandfoundation/algokit-utils": "npm:@d13co/dt-algokit-utils@9.2.3-dt.4.1.0.0",
-    "algosdk": "npm:dt-algosdk@3.9.0-dt.4.1.0.0"
+    "@algorandfoundation/algokit-utils": "file:./vendor/d13co-dt-algokit-utils-9.2.3-dt.5.2.0.0.tgz",
+    "algosdk": "file:./vendor/dt-algosdk-3.9.0-dt.5.2.0.0.tgz"
   },
   "overrides": {
-    "@algorandfoundation/algokit-utils": "npm:@d13co/dt-algokit-utils@9.2.3-dt.4.1.0.0",
-    "algosdk": "npm:dt-algosdk@3.9.0-dt.4.1.0.0"
+    "@algorandfoundation/algokit-utils": "$@algorandfoundation/algokit-utils",
+    "algosdk": "$algosdk"
   }
 }
 ```
+
+Once they are published, use `npm:@d13co/dt-algokit-utils@9.2.3-dt.5.2.0.0` and `npm:dt-algosdk@3.9.0-dt.5.2.0.0` in both places instead.
 
 With pnpm, put the same two entries under `overrides` in `pnpm-workspace.yaml` (or `pnpm.overrides` in `package.json`); with yarn, under `resolutions`. The forks' versions are prereleases, which `^` ranges don't match, so pin them exactly. Don't use `--legacy-peer-deps` or `--force` for a peer conflict: it means an override is missing, and those flags install a second, stock copy. Check with `npm ls algosdk @algorandfoundation/algokit-utils` that only the forks are installed. See [Installing the fork](https://github.com/d13co/dt-algokit-utils-ts#installing-the-fork).
 
 ### Development
 
-Ghostkit installs the dtalgorand forks from npm the same way, in `package.json`'s `dependencies` and `overrides`.
+Ghostkit installs the dtalgorand forks the same way, in `package.json`'s `dependencies` and `overrides`: from the tarballs in `vendor/` until they are on npm.
 
 - `npm run build`: compiles ghostkit and regenerates `examples/GhostofavmSDK.ts`.
 - `npm run check:example`: type-checks the example SDK and the tests against the fork of algokit-utils, and the example SDK against stock algokit-utils.
@@ -487,6 +491,16 @@ Ghostkit installs the dtalgorand forks from npm the same way, in `package.json`'
 - `npm run test:live`: live tests, once with each algokit-utils. Set `ALGOD_SERVER` (e.g. `http://localhost:4001`, a LocalNet on consensus v42) and/or `DT_ALGOD_SERVER` (a MainNet dtalgorand node with time travel); tokens in `ALGOD_TOKEN` / `DT_ALGOD_TOKEN`. Run the dtalgorand suite against a node with queries on and one with them off (`MaxAPIQueryCalls: 0`), to cover both queries and the multi-group simulate; the query-only tests skip on a node with queries off.
 
 The SDK's runtime is `src/templates/runtime.ts`, a regular module that ghostkit inlines into each generated SDK.
+
+### Migrating from 0.1.0-dt.6 (dtalgorand dt4)
+
+dtalgorand dt5 removed simulate's options for reads at several rounds, in parallel and under another protocol, which `POST /v2/query` replaced. Ghostkit 0.1.0-dt.7 supports dt5 only:
+
+- Install the dt5 forks (above). The dt4 forks can't read a dt5 node's capabilities.
+- `validityWindow` is gone from `atRounds`' options, and `maxRounds` and `resourceLimitMultiplier` from `GhostkitSimulateLimits`.
+- `protocol` applies to queries only. A call that sets it and must be simulated throws, and simulate runs each round under its own protocol, so on a node without queries a ghost only runs at rounds whose protocol allows its AVM version.
+- Chunks are sized to the consensus limits on unnamed resources (128 per group), with no multiplier.
+- On a dtalgorand node without queries, `atRounds` sends one simulate request per round, and the groups of a request run one after another: identical groups are sent once, and `ghostFee: 'max'` gives each group a share of what the reader can spend.
 
 ### Migrating from 0.0.x
 

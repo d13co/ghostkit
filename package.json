@@ -1,6 +1,6 @@
 {
   "name": "ghostkit",
-  "version": "0.1.0-dt.6",
+  "version": "0.1.0-dt.7",
   "description": "Generate typed SDKs for ghost contracts: Algorand contracts that are simulated, never deployed",
   "files": [
     "dist/"
@@ -37,12 +37,12 @@
   },
   "dependencies": {
     "@algorandfoundation/algokit-client-generator": "^6.0.0",
-    "@algorandfoundation/algokit-utils": "npm:@d13co/dt-algokit-utils@9.2.3-dt.4.1.0.0",
+    "@algorandfoundation/algokit-utils": "file:./vendor/d13co-dt-algokit-utils-9.2.3-dt.5.2.0.0.tgz",
     "algosdk": "file:./vendor/dt-algosdk-3.9.0-dt.5.2.0.0.tgz",
     "change-case": "^5.4.4"
   },
   "overrides": {
-    "@algorandfoundation/algokit-utils": "npm:@d13co/dt-algokit-utils@9.2.3-dt.4.1.0.0",
-    "algosdk": "file:./vendor/dt-algosdk-3.9.0-dt.5.2.0.0.tgz"
+    "@algorandfoundation/algokit-utils": "$@algorandfoundation/algokit-utils",
+    "algosdk": "$algosdk"
   }
 }
