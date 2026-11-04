@@ -125,9 +125,10 @@ describe.skipIf(!dtServer)('dtalgorand node (MainNet)', () => {
   const algorand = clientFor(dtServer ?? 'http://localhost', token)
   const sdk = new GhostV11SDK({ algorand })
   const fork = forkUtils(algorand)
-  // with stock algokit-utils there's no protocol override, so the ghost (AVM 11) only runs at rounds that allow it
-  const OLD = fork ? 20_000_000n : 64_000_000n
-  const MID = fork ? 40_000_000n : 65_000_000n
+  // Only queries override the protocol (simulate runs each round under its own), so without them the ghost (AVM 11)
+  // only runs at rounds that allow it; set in beforeAll, once it's known whether the node has queries
+  let OLD = 64_000_000n
+  let MID = 65_000_000n
   // the rewards pool has existed since genesis
   const proposer = '737777777777777777777777777777777777777777777777777UFEJ2CI'
   let last: bigint
@@ -139,6 +140,10 @@ describe.skipIf(!dtServer)('dtalgorand node (MainNet)', () => {
     last = (await algorand.client.algod.status().do()).lastRound
     const capabilities = await rest<{ query?: unknown }>(dtServer!, token, '/v2/capabilities')
     hasQuery = capabilities.query !== undefined
+    if (fork && hasQuery) {
+      OLD = 20_000_000n
+      MID = 40_000_000n
+    }
   })
 
   test('detects the node by its capabilities, and its queries', async () => {
@@ -147,21 +152,28 @@ describe.skipIf(!dtServer)('dtalgorand node (MainNet)', () => {
     expect(node.kind === 'dt' && node.query !== undefined).toBe(fork && hasQuery)
   })
 
-  test('queries give what the extended simulate gives', async (ctx) => {
+  test('queries give what the multi-group simulate gives', async (ctx) => {
     if (!fork || !hasQuery) ctx.skip()
     const feeSink = 'Y76M3MSY6DKBRHBL7C3NNDXGS5IIMQVQVUAB6MP4XEMMGVF2QWNPL226CA'
-    const rounds = [OLD, MID, last - 10n]
+    // rounds whose own protocol runs the ghost, since simulate can't override it; queries run them under it too
+    const rounds = [64_000_000n, 65_000_000n, last - 10n]
     const read = async (via: 'query' | 'dt') => {
       const s = new GhostV11SDK({ algorand, backend: via })
-      const balances = await s.atRounds(rounds, (v) => v.acctBalanceData({ methodArgsOrArgsArray: { accounts: [proposer, feeSink] } }))
-      const blocks = await Promise.all(rounds.map((r) => s.atRound(r).blkData({ methodArgsOrArgsArray: { firstRound: r - 3n, lastRound: r } })))
-      return { balances, blocks }
+      const balances = await s.atRounds(rounds, (v) => v.acctBalanceData({ methodArgsOrArgsArray: { accounts: [proposer, feeSink] } }), {
+        protocol: null,
+      })
+      const blocks = await Promise.all(
+        rounds.map((r) =>
+          s.atRound(r).blkData({ methodArgsOrArgsArray: { firstRound: r - 3n, lastRound: r }, extraSimulateArgs: { protocol: null } }),
+        ),
+      )
+      // a query reports how the round's protocol applied; simulate doesn't
+      return { balances: balances.map(({ protocolOverride: _override, ...r }) => r), blocks }
     }
     const queried = await read('query')
     const simulated = await read('dt')
     for (const r of queried.balances) if (!r.ok) throw r.error
     expect(queried).toEqual(simulated)
-    expect(queried.balances[0].protocolOverride?.applied).toBe(true)
   })
 
   test('an unfunded reader reads through queries', async (ctx) => {
@@ -217,10 +229,10 @@ describe.skipIf(!dtServer)('dtalgorand node (MainNet)', () => {
     expect(balances[0].address).toBe(proposer)
   })
 
-  test(`runs an AVM 13 ghost at a pre-v42 round ${fork ? 'under the latest protocol' : '(fails without dtalgorand)'}`, async () => {
+  test('runs an AVM 13 ghost at a pre-v42 round under the latest protocol with queries, and fails without them', async () => {
     const v13 = new GhostV13SDK({ algorand, backend })
     const results = await v13.atRounds([OLD], (s) => s.acctBalanceData({ methodArgsOrArgsArray: { accounts: [proposer] } }))
-    if (fork) {
+    if (fork && hasQuery) {
       const [r] = results
       if (!r.ok) throw r.error
       expect(r.protocolOverride?.applied).toBe(true)
@@ -233,7 +245,7 @@ describe.skipIf(!dtServer)('dtalgorand node (MainNet)', () => {
       // round 64M runs consensus v41, which allows up to AVM 12
       const [r] = results
       expect(r.ok).toBe(false)
-      if (!r.ok) expect(r.error.message).toMatch(/dtalgorand forks/)
+      if (!r.ok) expect(r.error.message).toMatch(fork ? /a dtalgorand node with queries on runs it under the latest/ : /dtalgorand forks/)
     }
   })
 

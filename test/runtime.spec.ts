@@ -183,10 +183,11 @@ describe('batch', () => {
 })
 
 describe('atRounds', () => {
-  test('returns each round, with validity windows rewritten by default', async () => {
+  test('returns each round', async () => {
     const { sdk, calls } = sdkWith(GhostV11SDK, fakeBackend({ fail: (round) => round === 20n }))
     const results = await sdk.atRounds([10, 20n, 30], (s) => s.blkTimestamp({ methodArgsOrArgsArray: { firstRound: 1n, lastRound: 1n } }))
-    expect(calls[0]).toMatchObject({ kind: 'simulateRounds', rounds: [10n, 20n, 30n], options: { validityWindow: 'rewrite' } })
+    expect(calls[0]).toMatchObject({ kind: 'simulateRounds', rounds: [10n, 20n, 30n] })
+    expect(calls[0].options).not.toHaveProperty('validityWindow')
     expect(results.map((r) => r.round)).toEqual([10n, 20n, 30n])
     expect(results.map((r) => (r.ok ? r.value : r.error.round))).toEqual([[20n], 20n, [40n]])
   })
@@ -202,12 +203,6 @@ describe('atRounds', () => {
     const [timestamps, balances] = r.value
     expect(timestamps).toEqual([15n])
     expect(balances[0].address).toBe(accounts[0])
-  })
-
-  test('validityWindow null leaves the windows alone', async () => {
-    const { sdk, calls } = sdkWith(GhostV11SDK)
-    await sdk.atRounds([5], (s) => s.blkTimestamp({ methodArgsOrArgsArray: { firstRound: 1n, lastRound: 1n } }), { validityWindow: null })
-    expect(calls[0].options.validityWindow).toBeUndefined()
   })
 })
 
@@ -275,25 +270,36 @@ describe('protocol', () => {
   const dt = () => fakeBackend({ name: 'dt', limits: GHOSTKIT_DT_DEFAULT_LIMITS })
   const call = (s: GhostV11SDK | GhostV13SDK) => s.blkTimestamp({ methodArgsOrArgsArray: { firstRound: 1n, lastRound: 1n } })
 
-  test('runs past rounds under the latest protocol on a dtalgorand node', async () => {
+  test('is not set on simulate, which runs each round under its own protocol', async () => {
     const { sdk, calls } = sdkWith(GhostV13SDK, dt())
     await call(sdk.atRound(5))
     await sdk.atRounds([5], (s) => call(s))
-    await call(sdk)
-    expect(calls.map((c) => c.options.protocol)).toEqual(['latest', 'latest', undefined])
-  })
-
-  test('null keeps each round under its own protocol, and a name is passed on', async () => {
-    const { sdk, calls } = sdkWith(GhostV11SDK, dt())
     await sdk.atRounds([5], (s) => call(s), { protocol: null })
-    await sdk.atRounds([5], (s) => call(s), { protocol: 'v40' })
-    expect(calls.map((c) => c.options.protocol)).toEqual([undefined, 'v40'])
+    await call(sdk)
+    expect(calls.map((c) => c.options.protocol)).toEqual([undefined, undefined, undefined, undefined])
+
+    const stock = sdkWith(GhostV11SDK)
+    await call(stock.sdk.atRound(5))
+    expect(stock.calls[0].options.protocol).toBeUndefined()
   })
 
-  test('is not set for a stock node', async () => {
-    const { sdk, calls } = sdkWith(GhostV11SDK)
-    await call(sdk.atRound(5))
-    expect(calls[0].options.protocol).toBeUndefined()
+  test('a protocol on a built-in simulate backend throws, and goes to a custom backend as given', async () => {
+    for (const name of ['dt', 'stock']) {
+      const { sdk, calls } = sdkWith(GhostV11SDK, fakeBackend({ name }))
+      await expect(sdk.atRounds([5], (s) => call(s), { protocol: 'v40' })).rejects.toThrow(/protocol 'v40' needs a query/)
+      expect(calls).toHaveLength(0)
+    }
+    const { sdk, calls } = sdkWith(GhostV11SDK, fakeBackend({ name: 'mine' }))
+    await sdk.atRounds([5], (s) => call(s), { protocol: 'v40' })
+    expect(calls[0].options.protocol).toBe('v40')
+  })
+
+  test('the built-in backends reject a protocol themselves', async () => {
+    const group = async () => {
+      throw new Error('not built')
+    }
+    const stock = await ghostkitStockBackend(offlineAlgorand()).simulate([group], { protocol: 'v40' })
+    expect(stock[0]).toMatchObject({ ok: false, error: { message: expect.stringMatching(/protocol 'v40' needs a query/) } })
   })
 })
 
@@ -308,21 +314,23 @@ describe('chunking', () => {
     expect(sizes(calls[0].groups)).toEqual([[127, 1], [127, 1], [44]])
   })
 
-  test('uses the resource multiplier of a dtalgorand node', async () => {
-    const { sdk, calls } = sdkWith(GhostV11SDK, fakeBackend({ name: 'dt', limits: { ...GHOSTKIT_DT_DEFAULT_LIMITS, resourceLimitMultiplier: 1024 } }))
+  test('uses the same limits on a dtalgorand node', async () => {
+    const { sdk, calls } = sdkWith(GhostV11SDK, fakeBackend({ name: 'dt', limits: GHOSTKIT_DT_DEFAULT_LIMITS }))
     await sdk.acctBalanceData({ methodArgsOrArgsArray: { accounts }, chunk: { arg: 'accounts' } })
-    expect(sizes(calls[0].groups)).toEqual([[127, 127, 46]])
+    expect(sizes(calls[0].groups)).toEqual([[127, 1], [127, 1], [44]])
 
     // capped at 2,048 bytes, to avoid the fee surcharge beyond it
     await sdk.acctBalanceData({ methodArgsOrArgsArray: { accounts }, chunk: { arg: 'accounts', maxArgBytes: 2_048 } })
-    expect(sizes(calls[1].groups)).toEqual([[63, 63, 63, 63, 48]])
+    expect(sizes(calls[1].groups)).toEqual([[63, 63, 2], [63, 63, 2], [44]])
   })
 
   test("uses v42's larger app args for a ghost that needs v42", async () => {
-    const { sdk, calls } = sdkWith(GhostV13SDK, fakeBackend({ name: 'dt', limits: { ...GHOSTKIT_DT_DEFAULT_LIMITS, resourceLimitMultiplier: 1024 } }))
-    await sdk.acctBalanceData({ methodArgsOrArgsArray: { accounts }, chunk: { arg: 'accounts' } })
+    const { sdk, calls } = sdkWith(GhostV13SDK, fakeBackend({ name: 'dt', limits: GHOSTKIT_DT_DEFAULT_LIMITS }))
+    await sdk.acctBalanceData({ methodArgsOrArgsArray: { accounts: accounts.slice(0, 100) }, chunk: { arg: 'accounts', refsPerItem: 0 } })
+    await sdk.acctBalanceData({ methodArgsOrArgsArray: { accounts }, chunk: { arg: 'accounts', refsPerItem: 0 } })
     // 511 addresses fit in 16,384 bytes of app args, but the array is one app arg of at most 4,096 bytes: 127 addresses
-    expect(sizes(calls[0].groups)).toEqual([[127, 127, 46]])
+    expect(sizes(calls[0].groups)).toEqual([[100]])
+    expect(sizes(calls[1].groups)).toEqual([[127, 127, 46]])
   })
 
   test('keeps the chunked array within 4,096 bytes on a stock node and with a larger maxArgBytes', async () => {
@@ -331,8 +339,8 @@ describe('chunking', () => {
     // 128 unnamed resources per group would allow 128 addresses in one app call: 4,098 bytes
     expect(sizes(v13.calls[0].groups)).toEqual([[127, 1], [127, 1], [44]])
 
-    const v11 = sdkWith(GhostV11SDK, fakeBackend({ name: 'dt', limits: { ...GHOSTKIT_DT_DEFAULT_LIMITS, resourceLimitMultiplier: 1024 } }))
-    await v11.sdk.acctBalanceData({ methodArgsOrArgsArray: { accounts }, chunk: { arg: 'accounts', maxArgBytes: 16_384 } })
+    const v11 = sdkWith(GhostV11SDK, fakeBackend({ name: 'dt', limits: GHOSTKIT_DT_DEFAULT_LIMITS }))
+    await v11.sdk.acctBalanceData({ methodArgsOrArgsArray: { accounts }, chunk: { arg: 'accounts', maxArgBytes: 16_384, refsPerItem: 0 } })
     expect(sizes(v11.calls[0].groups)).toEqual([[127, 127, 46]])
   })
 
@@ -466,14 +474,14 @@ describe('with a stub node', () => {
       'time-travel': true,
       'developer-api': false,
       'time-limit-seconds': 54,
-      simulate: { 'max-txn-groups': 8, 'max-rounds': 4, 'max-extra-opcode-budget': 640000, 'resource-limit-multiplier': 64 },
+      simulate: { 'max-txn-groups': 8, 'max-extra-opcode-budget': 640000 },
     }
 
     test.runIf(forkUtils)('reads the limits from the capabilities a dtalgorand node reports', async () => {
       routes = { '/v2/capabilities': { status: 200, body: capabilities } }
       expect(await ghostkitDetectNode(offlineAlgorand(port()))).toEqual({
         kind: 'dt',
-        limits: { maxTxnGroups: 8, maxRounds: 4, maxExtraOpcodeBudget: 640000, resourceLimitMultiplier: 64, timeTravel: true, developerApi: false },
+        limits: { maxTxnGroups: 8, maxExtraOpcodeBudget: 640000, timeTravel: true, developerApi: false },
       })
     })
 
@@ -567,6 +575,22 @@ describe('with a stub node', () => {
       expect(calls[1].groups[0][0].fee).toBe(5_000n)
     })
 
+    test('splits it between the groups of a dtalgorand simulate request, which run one after another', async () => {
+      reader({ latest: [10_000_000, 100_000] })
+      const many = randomAddresses(300)
+      const { sdk, calls } = sdkOn(GhostV11SDK, fakeBackend({ name: 'dt', limits: { ...GHOSTKIT_DT_DEFAULT_LIMITS, maxTxnGroups: 2 } }))
+      // 3 groups, at most 2 per request: each group gets half, less its own ghost apps' minimum balance
+      await sdk.acctBalanceData({ methodArgsOrArgsArray: { accounts: many }, chunk: { arg: 'accounts' } })
+      expect(calls[0].groups.map((g) => g[0].fee)).toEqual([4_950_000n - 200_000n, 4_950_000n - 200_000n, 4_950_000n - 100_000n])
+      // one group: all of it
+      await sdk.acctBalanceData({ methodArgsOrArgsArray: { accounts } })
+      expect(calls[1].groups[0][0].fee).toBe(9_900_000n - 100_000n)
+      // the stock backend sends each group alone: all of it each
+      const stock = sdkOn(GhostV11SDK)
+      await stock.sdk.acctBalanceData({ methodArgsOrArgsArray: { accounts: many }, chunk: { arg: 'accounts' } })
+      expect(stock.calls[0].groups.map((g) => g[0].fee)).toEqual([9_700_000n, 9_700_000n, 9_800_000n])
+    })
+
     /** Serves a dtalgorand node's capabilities, with time travel on or off. */
     const dtNode = (timeTravel: boolean) => {
       routes['/v2/capabilities'] = {
@@ -575,7 +599,7 @@ describe('with a stub node', () => {
           'time-travel': timeTravel,
           'developer-api': false,
           'time-limit-seconds': 54,
-          simulate: { 'max-txn-groups': 16, 'max-rounds': 16, 'max-extra-opcode-budget': 320000, 'resource-limit-multiplier': 1 },
+          simulate: { 'max-txn-groups': 16, 'max-extra-opcode-budget': 320000 },
         },
       }
     }
@@ -679,7 +703,7 @@ describe('with a stub node', () => {
       'time-travel': true,
       'developer-api': false,
       'time-limit-seconds': 54,
-      simulate: { 'max-txn-groups': 16, 'max-rounds': 16, 'max-extra-opcode-budget': 640000, 'resource-limit-multiplier': 128 },
+      simulate: { 'max-txn-groups': 16, 'max-extra-opcode-budget': 640000 },
     }
     const queryLimits = {
       'max-calls': 1024,
@@ -710,7 +734,7 @@ describe('with a stub node', () => {
       const node = await ghostkitDetectNode(offlineAlgorand(port()))
       expect(node).toEqual({
         kind: 'dt',
-        limits: { maxTxnGroups: 16, maxRounds: 16, maxExtraOpcodeBudget: 640000, resourceLimitMultiplier: 128, timeTravel: true, developerApi: false },
+        limits: { maxTxnGroups: 16, maxExtraOpcodeBudget: 640000, timeTravel: true, developerApi: false },
         query: {
           maxCalls: 1024,
           maxRounds: 16,
@@ -815,8 +839,8 @@ describe('with a stub node', () => {
       expect(ts).toEqual([10n + LAST_ROUND])
       expect(data.map((d) => d.address)).toEqual(accounts)
       expect(runs).toHaveLength(1)
-      // chunked as for the dtalgorand simulate: 127 addresses per app call
-      expect(runs[0].params.calls).toHaveLength(1 + 3)
+      // chunked as for simulate: 127 addresses per app call, 128 unnamed resources per group
+      expect(runs[0].params.calls).toHaveLength(1 + 5)
     })
 
     test('a failed app call fails its group, with where and why', async () => {
@@ -830,18 +854,23 @@ describe('with a stub node', () => {
       expect(error.message).toMatch(/Querying group 0 at round 5 failed at transaction 1: .*leave protocol unset or set it to 'latest'/)
     })
 
-    test('routes calls that need simulate to the extended simulate', async () => {
+    test('routes calls that need simulate to the multi-group simulate', async () => {
       const { sdk, runs, simulated } = setup(GhostV11SDK, { readerAccount: READER, ghostFee: 0 })
       await sdk.batch((s) => blk(s), { execTraceConfig: { enable: true } } as never)
       await sdk.batch((s) => blk(s), { extraOpcodeBudget: 400_000 })
-      await sdk.atRounds([5], (s) => blk(s), { validityWindow: null })
+      await sdk.atRounds([5, 6], (s) => blk(s), { execTraceConfig: { enable: true } } as never)
       await sdk.blkTimestamp({ methodArgsOrArgsArray: { firstRound: 1n, lastRound: 1n }, extraMethodCallArgs: { note: 'hi' } })
       await sdk.atRound(5).blkTimestamp({
         methodArgsOrArgsArray: { firstRound: 1n, lastRound: 1n },
         extraMethodCallArgs: { firstValidRound: 4n, lastValidRound: 6n },
       })
       expect(runs).toHaveLength(0)
-      expect(simulated.requests.map((r) => r.kind)).toEqual(['groups', 'groups', 'rounds', 'groups', 'groups'])
+      // one request per round, without the options dtalgorand's simulate no longer takes
+      expect(simulated.requests.map((r) => r.kind)).toEqual(['groups', 'groups', 'groups', 'groups', 'groups', 'groups'])
+      expect(simulated.requests.map((r) => r.options.round)).toEqual([undefined, undefined, 5n, 6n, undefined, 5n])
+      for (const { options } of simulated.requests) {
+        for (const removed of ['parallel', 'protocol', 'validityWindow', 'maxRounds']) expect(options).not.toHaveProperty(removed)
+      }
       // within the budget: queried
       await sdk.batch((s) => blk(s), { extraOpcodeBudget: 300_000 })
       expect(runs).toHaveLength(1)
@@ -864,6 +893,51 @@ describe('with a stub node', () => {
       await blk(sdk)
       expect(runs).toHaveLength(1)
       expect(simulated.requests).toHaveLength(1)
+    })
+
+    test('the dt backend sends at most maxTxnGroups groups per request, at one round, and identical groups once', async () => {
+      routes['/v2/capabilities'] = { status: 200, body: { ...capabilities, simulate: { 'max-txn-groups': 2, 'max-extra-opcode-budget': 640000 } } }
+      routes['/v2/status'] = {
+        status: 200,
+        body: {
+          'catchup-time': 0,
+          'last-round': 1234,
+          'last-version': 'v',
+          'next-version': 'v',
+          'next-version-round': 1235,
+          'next-version-supported': true,
+          'stopped-at-unsupported-round': false,
+          'time-since-last-round': 0,
+        },
+      }
+      const algorand = offlineAlgorand(port())
+      const simulated = fakeSimulate(algorand)
+      const sdk = new GhostV11SDK({ algorand, readerAccount: READER, ghostFee: 0, cacheParamsTimeout: 0, backend: 'dt' })
+      const many = randomAddresses(300)
+      const data = await sdk.acctBalanceData({ methodArgsOrArgsArray: { accounts: many }, chunk: { arg: 'accounts' } })
+      expect(data.map((d) => d.address)).toEqual(many)
+      // 3 groups: 2 + 1, both at the latest round, pinned so that they read the same one
+      expect(simulated.requests.map((r) => [r.groups.length, r.options.round]).sort()).toEqual([
+        [1, 1234n],
+        [2, 1234n],
+      ])
+      expect(simulated.requests[0].groups[0][0].firstValid).toBe(1235n)
+
+      // groups in one request run in one block, where a transaction can't appear twice
+      const one = randomAddresses(1)
+      const call = (s: GhostV11SDK) => s.acctBalanceData({ methodArgsOrArgsArray: { accounts: one } })
+      const [a, b] = await sdk.atRound(500).batch((s) => [call(s), call(s)])
+      expect(a).toEqual(b)
+      expect(simulated.requests[2].groups).toHaveLength(1)
+    })
+
+    test('on the dt backend, a round the node refuses fails only that round', async () => {
+      const algorand = offlineAlgorand(port())
+      fakeSimulate(algorand, { refuse: (round) => (round === 20n ? 'round 20 is not available' : undefined) })
+      const sdk = new GhostV11SDK({ algorand, readerAccount: READER, ghostFee: 0, cacheParamsTimeout: 0, backend: 'dt' })
+      const results = await sdk.atRounds([10, 20, 30], (s) => blk(s))
+      expect(results.map((r) => r.ok)).toEqual([true, false, true])
+      expect(results[1].ok === false && results[1].error.message).toMatch(/at round 20: round 20 is not available/)
     })
 
     test("simulates a run at a round after the node's latest, and throws the node's other rejections", async () => {

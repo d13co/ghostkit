@@ -156,32 +156,38 @@ export function fakeQuery(
   return { runs, spy }
 }
 
-type SimulateManagerLike = { groups: (...args: unknown[]) => Promise<unknown>; rounds: (...args: unknown[]) => Promise<unknown> }
+type SimulateManagerLike = { groups: (...args: unknown[]) => Promise<unknown> }
 
-/** Answers `algorand.simulate.groups` / `rounds` (the fork of algokit-utils) with `runExampleGhost`, recording each request. */
-export function fakeSimulate(algorand: AlgorandClient) {
-  const requests: { kind: 'groups' | 'rounds'; options: Record<string, unknown>; rounds?: bigint[]; groups: algosdk.Transaction[][] }[] = []
+/**
+ * Answers `algorand.simulate.groups` (the fork of algokit-utils) with `runExampleGhost`, recording each request. Like a
+ * dt5 node and the fork, it refuses more groups than `maxGroups` in one request, fails a group whose transactions an
+ * earlier group of the request already had, and `refuse(round)` makes a request at that round fail as a whole.
+ */
+export function fakeSimulate(algorand: AlgorandClient, { refuse = () => undefined }: { refuse?: (round: bigint) => string | undefined } = {}) {
+  const requests: { kind: 'groups'; options: Record<string, unknown>; groups: algosdk.Transaction[][] }[] = []
   const simulate = (algorand as unknown as { simulate: SimulateManagerLike }).simulate
-  const outcomesAt = async (composers: { buildTransactions(): Promise<{ transactions: algosdk.Transaction[] }> }[], round: bigint) => {
-    const built = await Promise.all(composers.map((c) => c.buildTransactions()))
-    const outcomes = built.map(({ transactions }) => ({
-      round,
-      ok: true,
-      result: { confirmations: transactions.map((t) => ({ logs: runExampleGhost(t, round) })), simulateResponse: { txnGroups: [] } },
-    }))
-    return { built, outcomes }
-  }
   const groups = vi.spyOn(simulate, 'groups').mockImplementation(async (composers, options) => {
     const opts = options as Record<string, unknown>
-    const { built, outcomes } = await outcomesAt(composers as never, opts.round !== undefined ? BigInt(opts.round as bigint) : LAST_ROUND)
+    const list = composers as { buildTransactions(): Promise<{ transactions: algosdk.Transaction[] }> }[]
+    if (typeof opts.maxGroups === 'number' && list.length > opts.maxGroups) {
+      throw new Error(`Can't simulate ${list.length} groups one after the other: maxGroups allows at most ${opts.maxGroups} per request`)
+    }
+    const round = opts.round !== undefined ? BigInt(opts.round as bigint) : LAST_ROUND
+    const refused = refuse(round)
+    if (refused) throw Object.assign(new Error(refused), { status: 400 })
+    const built = await Promise.all(list.map((c) => c.buildTransactions()))
     requests.push({ kind: 'groups', options: opts, groups: built.map((b) => b.transactions) })
-    return outcomes
+    const seen = new Set<string>()
+    return built.map(({ transactions }) => {
+      const ids = transactions.map((t) => t.txID())
+      if (ids.some((id) => seen.has(id))) return { round, ok: false, error: new Error(`transaction already in ledger: ${ids[0]}`) }
+      ids.forEach((id) => seen.add(id))
+      return {
+        round,
+        ok: true,
+        result: { confirmations: transactions.map((t) => ({ logs: runExampleGhost(t, round) })), simulateResponse: { txnGroups: [] } },
+      }
+    })
   })
-  const rounds = vi.spyOn(simulate, 'rounds').mockImplementation(async (composers, roundList, options) => {
-    const list = roundList as bigint[]
-    const perRound = await Promise.all(list.map((round) => outcomesAt(composers as never, round)))
-    requests.push({ kind: 'rounds', options: options as Record<string, unknown>, rounds: list, groups: perRound[0].built.map((b) => b.transactions) })
-    return list.map((round, r) => ({ round, groups: perRound[r].outcomes }))
-  })
-  return { requests, groups, rounds }
+  return { requests, groups }
 }

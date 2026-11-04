@@ -3,7 +3,7 @@
 // Shared by every ghostkit SDK: ghostkit inlines this file into each SDK it generates, after the algokit-generated
 // typed client. It must only import algosdk and algokit-utils, under names that can't clash with the generated client
 // (exports start with `Ghostkit`/`GHOSTKIT_`, private names with `gk`). It runs on stock algokit-utils and algosdk, and
-// uses the dtalgorand forks' read-only queries (POST /v2/query) or extended simulate when they and the node support them.
+// uses the dtalgorand forks' read-only queries (POST /v2/query) or multi-group simulate when they and the node support them.
 var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
     var desc = Object.getOwnPropertyDescriptor(m, k);
@@ -52,18 +52,14 @@ const gkAlgosdk = __importStar(require("algosdk"));
 /** The limits of a stock algod's simulate. */
 exports.GHOSTKIT_STOCK_LIMITS = Object.freeze({
     maxTxnGroups: 1,
-    maxRounds: 0,
     maxExtraOpcodeBudget: 320000,
-    resourceLimitMultiplier: 1,
     timeTravel: false,
     developerApi: false,
 });
 /** The limits of a dtalgorand node with its default config: the default of `ghostkitDTBackend` and `ghostkitQueryBackend`. */
 exports.GHOSTKIT_DT_DEFAULT_LIMITS = Object.freeze({
     maxTxnGroups: 16,
-    maxRounds: 16,
     maxExtraOpcodeBudget: 320000,
-    resourceLimitMultiplier: 1,
     timeTravel: true,
     developerApi: false,
 });
@@ -188,7 +184,7 @@ const gkErrorText = (e) => {
     }
     return err?.message ?? String(e);
 };
-/** Whether a backend runs on a dtalgorand node's extensions (queries or the extended simulate), e.g. `protocol`. */
+/** Whether a backend runs on a dtalgorand node (queries or the multi-group simulate), e.g. with time travel. */
 const gkExtended = (backend) => backend.name === 'dt' || backend.name === 'query';
 /** Maps with at most `limit` promises pending at once. */
 async function gkMapLimit(items, limit, fn) {
@@ -213,7 +209,7 @@ const gkValidityAt = (round) => ({ firstValidRound: round + 1n, lastValidRound: 
 /**
  * A dtalgorand node's limits, or `undefined` for stock algod, the only node without them. They come from the node's
  * capabilities (`DTAlgodClient.capabilities()`), which dt-algosdk caches per algod client and the fork of algokit-utils
- * reads before each extended simulate and query, so the node is asked once.
+ * reads before each multi-group simulate and query, so the node is asked once.
  */
 async function gkFetchLimits(algorand) {
     const dt = gkDTAlgod();
@@ -225,10 +221,8 @@ async function gkFetchLimits(algorand) {
     const q = caps.query;
     return {
         simulate: {
-            maxTxnGroups: caps.simulate.maxTxnGroups,
-            maxRounds: caps.simulate.maxRounds,
+            maxTxnGroups: Math.max(1, caps.simulate.maxTxnGroups),
             maxExtraOpcodeBudget: caps.simulate.maxExtraOpcodeBudget,
-            resourceLimitMultiplier: caps.simulate.resourceLimitMultiplier,
             timeTravel: caps.timeTravel,
             developerApi: caps.developerApi,
         },
@@ -257,10 +251,10 @@ function gkMissingForks(algorand) {
     return undefined;
 }
 /**
- * Finds out whether ghost calls can use dtalgorand's queries or extended simulate: the loaded algokit-utils and algosdk
- * must be the dtalgorand forks, and the node must report its capabilities (`GET /v2/capabilities`), which every
+ * Finds out whether ghost calls can use dtalgorand's queries or multi-group simulate: the loaded algokit-utils and
+ * algosdk must be the dtalgorand forks, and the node must report its capabilities (`GET /v2/capabilities`), which every
  * dtalgorand node does and stock algod doesn't. They also say which of the node's optional features are on: queries
- * (`query`), several rounds per simulate (`simulate.maxRounds`) and time travel (`timeTravel`).
+ * (`query`), several groups per simulate (`simulate.maxTxnGroups`) and time travel (`timeTravel`).
  */
 async function ghostkitDetectNode(algorand) {
     const stock = (reason) => ({ kind: 'stock', limits: exports.GHOSTKIT_STOCK_LIMITS, reason });
@@ -279,7 +273,7 @@ function ghostkitStockBackend(algorand, { concurrency = 8 } = {}) {
             gkThrowIfAborted(options.signal);
             const { protocol, ...raw } = options;
             if (protocol)
-                throw new Error(`protocol '${protocol}' needs a dtalgorand node`);
+                throw gkProtocolNeedsQuery(protocol);
             const composer = await group(round !== undefined ? gkValidityAt(round) : undefined);
             const result = await composer.simulate({ ...raw, skipSignatures: true, ...(round !== undefined ? { round: Number(round) } : {}) });
             return {
@@ -298,68 +292,83 @@ function ghostkitStockBackend(algorand, { concurrency = 8 } = {}) {
         name: 'stock',
         limits: exports.GHOSTKIT_STOCK_LIMITS,
         simulate: (groups, { round, ...options }) => gkMapLimit(groups, concurrency, (g) => simulateOne(g, options, round)),
-        simulateRounds: async (groups, rounds, { validityWindow: _ignored, ...options }) => {
+        simulateRounds: async (groups, rounds, options) => {
             const flat = await gkMapLimit(rounds.flatMap((round) => groups.map((group) => ({ round, group }))), concurrency, ({ round, group }) => simulateOne(group, options, round));
             return rounds.map((round, r) => ({ round, groups: flat.slice(r * groups.length, (r + 1) * groups.length) }));
         },
     };
 }
-function gkFromDTOutcome(o, protocolOverride) {
-    const override = o.protocolOverride ?? protocolOverride;
-    const extra = override ? { protocolOverride: override } : {};
+/** The error of a simulate asked to run under another protocol, which only queries can. */
+const gkProtocolNeedsQuery = (protocol) => new Error(`protocol '${protocol}' needs a query (a dtalgorand node with queries on): simulate runs each round under its own protocol`);
+function gkFromDTOutcome(o) {
     if (!o.ok)
-        return { ok: false, error: o.error, ...extra };
+        return { ok: false, error: o.error };
     const { confirmations, simulateResponse } = o.result;
     // the group's usage is on its entry in the response, found by its first transaction's result
     const first = confirmations[0] ?? null;
-    const all = [...(simulateResponse.txnGroups ?? []), ...(simulateResponse.roundResults ?? []).flatMap((r) => r.txnGroups ?? [])];
-    const groupUsage = all.find((g) => g.txnResults[0]?.txnResult === first)?.groupUsage;
-    return { ok: true, logs: confirmations.map((c) => c.logs ?? []), groupUsage, ...extra };
+    const groupUsage = (simulateResponse.txnGroups ?? []).find((g) => g.txnResults[0]?.txnResult === first)?.groupUsage;
+    return { ok: true, logs: confirmations.map((c) => c.logs ?? []), groupUsage };
 }
 /**
- * dtalgorand's extended simulate through the fork of algokit-utils: independent groups go in as few requests as the
- * node allows, and rounds too.
+ * dtalgorand's multi-group simulate through the fork of algokit-utils: independent groups go in as few requests as the
+ * node allows (`maxTxnGroups`), up to 4 at a time, one round per request. The groups of a request run one after another
+ * in one block, each from the state the ones before it left (a failed group is rolled back), so their fees and the ghost
+ * apps' minimum balance add up for the reader, and a transaction can't appear twice: identical groups are sent once and
+ * share their outcome. A request the node refuses (e.g. for a round it doesn't have) fails each of its groups.
  */
 function ghostkitDTBackend(algorand, limits = exports.GHOSTKIT_DT_DEFAULT_LIMITS) {
     const manager = gkForkUtils(algorand)?.simulate;
     if (!manager)
         throw new Error('ghostkit: the dt backend needs the dtalgorand fork of algokit-utils (algorand.simulate)');
+    const perRequest = Math.max(1, limits.maxTxnGroups);
     const simulate = async (groups, { round, protocol, ...raw }) => {
-        const composers = await Promise.all(groups.map((g) => g(round !== undefined ? gkValidityAt(round) : undefined)));
-        const outcomes = await manager.groups(composers, {
-            ...raw,
-            parallel: true,
-            maxGroups: limits.maxTxnGroups,
-            ...(round !== undefined ? { round } : {}),
-            ...(protocol ? { protocol } : {}),
-        });
-        return outcomes.map((o) => gkFromDTOutcome(o));
+        if (protocol)
+            throw gkProtocolNeedsQuery(protocol);
+        if (groups.length === 0)
+            return [];
+        const signal = raw.signal;
+        gkThrowIfAborted(signal);
+        // several requests at the latest round would each take the round they arrive at: pin one for all of them
+        let at = round;
+        if (at === undefined && groups.length > perRequest) {
+            at = (await algorand.client.algod.status().do(undefined, signal ? { signal } : undefined)).lastRound;
+        }
+        const composers = await Promise.all(groups.map((g) => g(at !== undefined ? gkValidityAt(at) : undefined)));
+        // the groups by their transactions' IDs, so that identical groups run once
+        const unique = [];
+        const indexOf = new Map();
+        const slot = [];
+        for (const composer of composers) {
+            const key = groups.length > 1 ? (await composer.buildTransactions()).transactions.map((t) => t.txID()).join() : '';
+            let i = indexOf.get(key);
+            if (i === undefined) {
+                i = unique.push(composer) - 1;
+                indexOf.set(key, i);
+            }
+            slot.push(i);
+        }
+        const slices = Array.from({ length: Math.ceil(unique.length / perRequest) }, (_, k) => unique.slice(k * perRequest, (k + 1) * perRequest));
+        const outcomes = (await gkMapLimit(slices, 4, async (slice) => {
+            try {
+                gkThrowIfAborted(signal);
+                const results = await manager.groups(slice, { ...raw, maxGroups: perRequest, ...(at !== undefined ? { round: at } : {}) });
+                return results.map(gkFromDTOutcome);
+            }
+            catch (e) {
+                // an abort rejects the whole call, as on the other backends; another error fails this request's groups
+                gkThrowIfAborted(signal);
+                const error = gkAsError(e);
+                return slice.map(() => ({ ok: false, error }));
+            }
+        })).flat();
+        return slot.map((i) => outcomes[i]);
     };
     return {
         name: 'dt',
         limits,
         simulate,
-        simulateRounds: async (groups, rounds, { validityWindow, protocol, ...raw }) => {
-            if (limits.maxRounds < 1) {
-                // the node takes one round per request
-                return gkMapLimit(rounds, 4, async (round) => ({ round, groups: await simulate(groups, { ...raw, protocol, round }) }));
-            }
-            // `rewrite` keeps each transaction's validity width: a zero width lets `block` read the furthest back at every round
-            const composers = await Promise.all(groups.map((g) => g(validityWindow === 'rewrite' ? gkValidityAt(rounds[0]) : undefined)));
-            const results = await manager.rounds(composers, rounds, {
-                ...raw,
-                parallel: true,
-                maxGroups: limits.maxTxnGroups,
-                maxRounds: limits.maxRounds,
-                ...(validityWindow ? { validityWindow } : {}),
-                ...(protocol ? { protocol } : {}),
-            });
-            return results.map((r) => ({
-                round: r.round,
-                groups: r.groups.map((o) => gkFromDTOutcome(o, r.protocolOverride)),
-                ...(r.protocolOverride ? { protocolOverride: r.protocolOverride } : {}),
-            }));
-        },
+        // one request per round, with the groups built valid at it
+        simulateRounds: (groups, rounds, options) => gkMapLimit(rounds, 4, async (round) => ({ round, groups: await simulate(groups, { ...options, round }) })),
     };
 }
 /** The name of the error `ghostkitQueryBackend` throws for groups it can't query; `auto` then simulates the run. */
@@ -451,8 +460,9 @@ function gkQueryGroupError(group, round, failure) {
  * without programs, or with an access list, `rejectVersion`, a note, a lease or a rekey) make it throw an error named
  * `GhostkitQueryUnsupported`.
  *
- * `limits` are the node's simulate limits: ghostkit sizes chunks by them, so that a run that falls back to simulate
- * fits too (and anything that fits in a simulated group fits in queries).
+ * `limits` are the node's simulate limits, which the SDK reads for fees and hints when a run falls back to simulate.
+ * Chunks are sized for simulated groups, so a run that falls back fits (and anything that fits in a simulated group fits
+ * in queries).
  */
 function ghostkitQueryBackend(algorand, { limits = exports.GHOSTKIT_DT_DEFAULT_LIMITS, concurrency } = {}) {
     const manager = gkForkUtils(algorand)?.query;
@@ -512,7 +522,7 @@ function ghostkitQueryBackend(algorand, { limits = exports.GHOSTKIT_DT_DEFAULT_L
         name: 'query',
         limits,
         simulate: async (groups, { round, ...options }) => (await query(groups, [round ?? 0n], options))[0].groups,
-        simulateRounds: (groups, rounds, { validityWindow: _ignored, ...options }) => query(groups, rounds, options),
+        simulateRounds: (groups, rounds, options) => query(groups, rounds, options),
     };
 }
 /** The versions listing of one change source. */
@@ -696,10 +706,11 @@ class GhostkitBase {
      * Runs the calls `fn` makes at each round, and returns their results per round. `fn` must return the calls'
      * promises (one, or an array) without awaiting them.
      *
-     * On a dtalgorand node the rounds and calls go in as few requests as its limits allow, rounds any distance apart (with
-     * queries, one request per up to `maxCalls` app calls and `maxRounds` rounds, at most `maxTotalCalls` app calls ×
-     * rounds: by default 1,024 app calls at one round, or 64 at 16 rounds); on a stock node
-     * each call is simulated at each round on its own, and only the last few rounds are available.
+     * On a dtalgorand node with queries the rounds and calls go in as few requests as its limits allow, rounds any
+     * distance apart (one request per up to `maxCalls` app calls and `maxRounds` rounds, at most `maxTotalCalls` app calls
+     * × rounds: by default 1,024 app calls at one round, or 64 at 16 rounds). Calls that must be simulated, and nodes
+     * without queries, take one simulate request per round (on a dtalgorand node, with as many groups as it allows). A
+     * stock node only has its last few rounds.
      *
      * @example
      * const balances = await sdk.atRounds([46_000_000n, 47_000_000n], (s) => s.acctBalanceData({ methodArgsOrArgsArray: { accounts } }))
@@ -723,9 +734,9 @@ class GhostkitBase {
     }
     /**
      * Simulates the calls `fn` makes together: on a dtalgorand node in one request (or as few as its limits allow; with
-     * queries, up to `maxCalls` and `maxTotalCalls` app calls per request, 1,024 by default), on a stock node one request per call,
-     * concurrently. `fn` must return the calls' promises (one, or an array) without
-     * awaiting them. Rejects with the first failed call's error.
+     * queries, up to `maxCalls` and `maxTotalCalls` app calls per request, 1,024 by default; with simulate, up to
+     * `maxTxnGroups` groups), on a stock node one request per call, concurrently. `fn` must return the calls' promises
+     * (one, or an array) without awaiting them. Rejects with the first failed call's error.
      *
      * @example
      * const [timestamps, balances] = await sdk.batch((s) => [s.blkTimestamp({ ... }), s.acctBalanceData({ ... })])
@@ -942,8 +953,7 @@ class GhostkitBase {
                 throw new Error(`ghostkit: ${method}: chunk takes a single methodArgsOrArgsArray object, not a list`);
             if (Array.isArray(extraMethodCallArgs))
                 throw new Error(`ghostkit: ${method}: chunk takes a single extraMethodCallArgs object`);
-            const backend = await this._gkResolveBackend();
-            groupEntries = this._gkChunk(spec.signature, argsList[0], chunk, backend.limits).map((txns) => txns.map((args) => ({ args, extra: extraAt(0) })));
+            groupEntries = this._gkChunk(spec.signature, argsList[0], chunk).map((txns) => txns.map((args) => ({ args, extra: extraAt(0) })));
         }
         else {
             if (argsList.length > GK_MAX_GROUP_SIZE) {
@@ -1039,8 +1049,8 @@ class GhostkitBase {
             ...(simulateOnly ? { simulateOnly } : {}),
         };
     }
-    /** Splits a call's array argument into groups of app calls, sized to the node's limits. */
-    _gkChunk(signature, args, chunk, limits) {
+    /** Splits a call's array argument into groups of app calls, sized to app arg bytes and the unnamed resource limits. */
+    _gkChunk(signature, args, chunk) {
         const method = this._gkMethod(signature);
         const name = method.name;
         const arg = method.args.find((a) => a.name === chunk.arg);
@@ -1079,7 +1089,7 @@ class GhostkitBase {
             throw new Error(`ghostkit: ${name}: set chunk.maxPerTxn, since the items of ${chunk.arg} vary in size`);
         }
         const refsPerItem = chunk.refsPerItem ?? 1;
-        const perGroupRefs = refsPerItem > 0 ? Math.floor((GK_MAX_GROUP_SIZE * GK_REFS_PER_TXN * limits.resourceLimitMultiplier) / refsPerItem) : Infinity;
+        const perGroupRefs = refsPerItem > 0 ? Math.floor((GK_MAX_GROUP_SIZE * GK_REFS_PER_TXN) / refsPerItem) : Infinity;
         perTxn = Math.min(perTxn, perGroupRefs);
         if (!(perTxn >= 1))
             throw new Error(`ghostkit: ${name}: not even one item of ${chunk.arg} fits in an app call`);
@@ -1113,9 +1123,10 @@ class GhostkitBase {
     async _gkRun(calls, target, options) {
         let backend = await this._gkResolveBackend();
         let fallback;
+        const { signal, protocol } = { ...options, ...calls[0]?.options };
         if (backend.name === 'query') {
             const auto = this.backend === 'auto';
-            fallback = await this._gkQueryBlocker(calls, target, options);
+            fallback = await this._gkQueryBlocker(calls, options);
             if (fallback && !auto)
                 throw new Error(`ghostkit: backend 'query' can't run this call: ${fallback}`);
             if (!fallback) {
@@ -1123,27 +1134,28 @@ class GhostkitBase {
                     return await this._gkRunOn(backend, calls, target, options);
                 }
                 catch (e) {
-                    const signal = { ...options, ...calls[0]?.options }.signal;
                     fallback = auto && !signal?.aborted ? this._gkQueryFallback(e) : undefined;
-                    if (!fallback)
+                    // simulate can't run under another protocol, so the query's error stands
+                    if (!fallback || protocol)
                         throw e;
                 }
             }
             backend = await this._gkSimulateBackend();
         }
+        // the built-in simulate backends run each round under its own protocol; a custom backend may do more
+        if (protocol && (backend.name === 'dt' || backend.name === 'stock')) {
+            throw new Error(`ghostkit: ${gkProtocolNeedsQuery(protocol).message}${fallback ? `, and this call can't be queried: ${fallback}` : ''}`);
+        }
         return this._gkRunOn(backend, calls, target, options, fallback);
     }
     /** Why a run must be simulated rather than queried, or undefined if it can be queried. */
-    async _gkQueryBlocker(calls, target, options) {
+    async _gkQueryBlocker(calls, options) {
         const merged = { ...options, ...calls[0]?.options };
         if (merged.execTraceConfig?.enable)
             return 'execution traces need simulate';
         const own = calls.find((c) => c.simulateOnly)?.simulateOnly;
         if (own)
             return own;
-        if (target.kind === 'rounds' && (merged.validityWindow === 'skip' || merged.validityWindow === null)) {
-            return `validityWindow ${merged.validityWindow} needs simulate`;
-        }
         const limits = await this._gkQueryLimits();
         if (!limits)
             return undefined;
@@ -1232,17 +1244,16 @@ class GhostkitBase {
     }
     /** Runs prepared calls on a backend; `fallback` is why `_gkRun` fell back to it, for debug. */
     async _gkRunOn(backend, calls, target, options, fallback) {
-        const { validityWindow, protocol, round: _round, ...rest } = { ...options, ...calls[0]?.options };
+        const { protocol, round: _round, ...rest } = { ...options, ...calls[0]?.options };
         const raw = { extraOpcodeBudget: 170000, allowMoreLogging: true, allowUnnamedResources: true, ...rest };
         // every backend, custom ones included, rejects an aborted call with the reason, before and after its requests
         gkThrowIfAborted(rest.signal);
         // Ghosts are compiled for recent AVM versions (and maybe v42's larger programs), which older rounds' protocols
-        // reject. On a dtalgorand node past rounds run under the latest protocol, a no-op at rounds already on it.
-        const past = target.kind !== 'latest';
-        const autoProtocol = protocol === undefined && past && gkExtended(backend) ? 'latest' : undefined;
+        // reject. Queries at past rounds run under the latest protocol, a no-op at rounds already on it; simulate can't.
+        const query = backend.name === 'query';
+        const autoProtocol = protocol === undefined && target.kind !== 'latest' && query ? 'latest' : undefined;
         const request = { ...raw, ...((protocol ?? autoProtocol) ? { protocol: (protocol ?? autoProtocol) } : {}) };
         // queries check no fees or validity, and need the real reader only for `account` arguments: no requests for them
-        const query = backend.name === 'query';
         let fees = { kind: 'min' };
         let minFee = 1000n;
         let build;
@@ -1256,6 +1267,13 @@ class GhostkitBase {
             const [params, reader] = await Promise.all([this._gkParams(paramsMaxAge), this._gkReader()]);
             minFee = BigInt(params.minFee);
             fees = await this._gkFeePlan(target, minFee);
+            if (fees.kind === 'max' && backend.name === 'dt') {
+                // the groups of a request run one after another, each paying its fees and its ghost apps' minimum balance from
+                // what the ones before it left: each gets a share
+                const groupCount = calls.reduce((n, c) => n + c.groupCount, 0);
+                const perRequest = BigInt(Math.max(1, Math.min(groupCount, backend.limits.maxTxnGroups)));
+                fees = { ...fees, spendable: fees.spendable / perRequest };
+            }
             build = { reader, fees, params: () => this._gkParams(paramsMaxAge) };
         }
         const groups = calls.flatMap((c) => c.groupsFor(build));
@@ -1272,8 +1290,7 @@ class GhostkitBase {
         }
         let rounds;
         if (target.kind === 'rounds') {
-            const mode = validityWindow === undefined ? 'rewrite' : (validityWindow ?? undefined);
-            rounds = await backend.simulateRounds(groups, target.rounds, { ...request, ...(mode ? { validityWindow: mode } : {}) });
+            rounds = await backend.simulateRounds(groups, target.rounds, request);
         }
         else {
             const round = target.kind === 'round' ? target.round : undefined;
@@ -1331,9 +1348,11 @@ class GhostkitBase {
             return `the reader (${reader}) can't pay the fees or the ghost app's minimum balance at this round; set a readerAccount funded at it`;
         }
         if (/program version \d+ greater than protocol supported version/.test(message)) {
-            return gkExtended(backend)
-                ? "the ghost's AVM version is newer than this round's protocol allows; leave protocol unset or set it to 'latest'"
-                : "the ghost's AVM version is newer than this round's protocol allows; running it there needs a dtalgorand node and the dtalgorand forks of algokit-utils and algosdk";
+            if (backend.name === 'query')
+                return "the ghost's AVM version is newer than this round's protocol allows; leave protocol unset or set it to 'latest'";
+            return backend.name === 'dt'
+                ? "the ghost's AVM version is newer than this round's protocol allows, and simulate runs each round under its own protocol; a dtalgorand node with queries on runs it under the latest"
+                : "the ghost's AVM version is newer than this round's protocol allows; running it there needs a dtalgorand node with queries on and the dtalgorand forks of algokit-utils and algosdk";
         }
         if (target.kind !== 'latest' && backend.name === 'stock' && gkStatus(error) !== undefined) {
             return 'a stock node only simulates its last few rounds; use a dtalgorand node with time travel for older rounds';
