@@ -38,11 +38,11 @@
   "dependencies": {
     "@algorandfoundation/algokit-client-generator": "^6.0.0",
     "@algorandfoundation/algokit-utils": "npm:@d13co/dt-algokit-utils@9.2.3-dt.4.1.0.0",
-    "algosdk": "npm:dt-algosdk@3.9.0-dt.4.1.0.0",
+    "algosdk": "file:./vendor/dt-algosdk-3.9.0-dt.5.2.0.0.tgz",
     "change-case": "^5.4.4"
   },
   "overrides": {
     "@algorandfoundation/algokit-utils": "npm:@d13co/dt-algokit-utils@9.2.3-dt.4.1.0.0",
-    "algosdk": "npm:dt-algosdk@3.9.0-dt.4.1.0.0"
+    "algosdk": "file:./vendor/dt-algosdk-3.9.0-dt.5.2.0.0.tgz"
   }
 }
