@@ -1,0 +1,277 @@
+{
+  "$schema": "https://aka.ms/codetour-schema",
+  "title": "ghostkit on dtalgorand: the major changes",
+  "description": "The feat/dt branch: a generated SDK that runs on any algod, uses dtalgorand's queries or multi-group simulate when the forks and node support them, handles AVM 13 / consensus v42, batches and chunks calls, and keeps its requests down.",
+  "steps": [
+    {
+      "title": "Overview",
+      "file": "README.md",
+      "line": 341,
+      "description": "## What changed\n\nThe generated SDK used to build one group per call and simulate it with `composer.simulate`. Now it:\n\n- runs on stock algokit-utils/algosdk and on the dtalgorand forks, picking a **backend** at runtime\n- reads **past rounds** (`atRound`, `atRounds`) and **batches** calls (`batch`)\n- **chunks** large array inputs to the node's limits\n- handles **consensus v42 / AVM 13**: larger programs and args, usage-based fees, protocol overrides for old rounds\n- **caches** what it learns about the node, shared by every ghostkit SDK on an AlgorandClient\n- sends ghost calls as read-only **queries** (`POST /v2/query`) on a dtalgorand node that has them, with simulate as the fallback\n\nThis section of the README has the stock/dtalgorand matrix. The tour follows the code from the generator to the runtime, then the tests."
+    },
+    {
+      "title": "The forks",
+      "file": "package.json",
+      "line": 39,
+      "description": "## Dependencies\n\nThe dtalgorand forks of algokit-utils (`@d13co/dt-algokit-utils` `9.2.3-dt.4.1.0.0`) and algosdk (`dt-algosdk` `3.9.0-dt.4.1.0.0`) come from npm, installed under the stock names and pinned exactly; `overrides` makes the whole tree use them, so peer ranges are satisfied without `legacy-peer-deps`. Ghostkit supports only the current dtalgorand release, and these are its forks.\n\nStock algokit-utils 9.2.2 is installed alongside as `algokit-utils-stock`, so every suite runs against both (see the vitest config later). There is one algosdk copy, the fork, which is a superset of stock."
+    },
+    {
+      "title": "Scripts",
+      "file": "package.json",
+      "line": 19,
+      "description": "- `build`: compiles and regenerates the example SDK. `postbuild` also copies `runtime.ts`, which is inlined into each generated SDK.\n- `check:example`: type-checks the example SDK and tests against the fork, and the example against stock utils (`tsconfig.example-stock.json`).\n- `test`: offline unit tests, with each utils build.\n- `test:live`: LocalNet (`ALGOD_SERVER`) and a dtalgorand node (`DT_ALGOD_SERVER`), with each utils build."
+    },
+    {
+      "title": "Program facts at generation time",
+      "file": "src/build.ts",
+      "line": 44,
+      "description": "## `getGhostMeta`\n\nReads the ghost's **AVM version** (the varuint at the start of the approval program) and sizes its **extra program pages** to the bytecode. The old code always used 3.\n\n- more than 7 pages: error (an app can't hold it)\n- more than 3 pages: warning (needs consensus v42 and costs a fee surcharge)\n\nThe result is emitted into the SDK as `GHOST_META`."
+    },
+    {
+      "title": "@ghostkit-chunk",
+      "file": "src/build.ts",
+      "line": 62,
+      "description": "## Chunk tag\n\nA method can opt into automatic chunking in its doc comment:\n\n```\n@ghostkit-chunk accounts refsPerItem=2 maxPerGroup=100\n```\n\nThe argument must be a dynamic array. Dynamic items (e.g. `string[]`) need `maxPerTxn`, since their size isn't known up front. The parsed options become the method's default `chunk`. Only methods that log one result per item, independently, should use it."
+    },
+    {
+      "title": "Reserved names and overloads",
+      "file": "src/build.ts",
+      "line": 127,
+      "description": "Generated methods are prototype methods on the SDK class, so an instance field or base method with the same name would hide one. The old hook's `simulate` field did exactly that. The generator now refuses method names in `GHOSTKIT_RESERVED_MEMBERS` or starting with `_gk`, and methods that would get the same TypeScript name (overloads)."
+    },
+    {
+      "title": "Assembling the SDK",
+      "file": "src/build.ts",
+      "line": 150,
+      "description": "A generated SDK is three pieces: the algokit-generated typed client, the **runtime** (`src/templates/runtime.ts`, inlined as is), and the small SDK template with one method per ABI method. Generated SDKs still import only algokit-utils and algosdk, never ghostkit."
+    },
+    {
+      "title": "The SDK template",
+      "file": "src/templates/index.ts.template",
+      "line": 12,
+      "description": "The generated class extends `GhostkitBase`, passing the app spec, `GHOST_META`, and how to create the typed factory and client. All behaviour lives in the runtime."
+    },
+    {
+      "title": "Generated methods",
+      "file": "src/templates/method.ts.template",
+      "line": 4,
+      "description": "Each method hands its signature, its default chunking and a typed params builder to `_gkCall`.\n\nMethods are **not `async`** any more: an async wrapper creates a new promise, and `batch`/`atRounds` find their calls by the identity of the promise each method returns."
+    },
+    {
+      "title": "The runtime",
+      "file": "src/templates/runtime.ts",
+      "line": 1,
+      "description": "## `runtime.ts`\n\nAn ordinary TypeScript module, type-checked with ghostkit and inlined into every generated SDK. Its imports are aliased (`Gk…`, `gkAlgosdk`), and its exports start with `Ghostkit`, so they can't clash with the generated client's names.\n\nIt imports nothing from the forks: it finds their features at runtime, so the SDK also compiles against stock algokit-utils."
+    },
+    {
+      "title": "Constructor options",
+      "file": "src/templates/runtime.ts",
+      "line": 224,
+      "description": "## `GhostkitSDKParams`\n\n- `readerAccount`: defaults to the network's **fee sink**, which is funded at every round. The old default, a hardcoded TestNet address, had 0 Algo at MainNet round 20M.\n- `backend`: `auto`, `dt`, `stock`, or a custom `GhostkitBackend`.\n- `ghostFee`: 1 Algo on each group's first app call by default. `'max'` pays what the reader can spend; `0` the minimum fee.\n- `cacheParamsTimeout`: how long calls at the latest round reuse suggested params (3 s)."
+    },
+    {
+      "title": "Simulate options",
+      "file": "src/templates/runtime.ts",
+      "line": 29,
+      "description": "`extraSimulateArgs` is plain `RawSimulateOptions` again (the hook's `Record<string, unknown>` widening is gone), plus `protocol`.\n\n`protocol` defaults to `latest` at past rounds on a dtalgorand node: an AVM 11 ghost fails at MainNet round 40M (AVM 10) without it, and the override is a no-op at rounds already on the latest protocol. `null` turns it off."
+    },
+    {
+      "title": "Backends",
+      "file": "src/templates/runtime.ts",
+      "line": 170,
+      "description": "## `GhostkitBackend`\n\nThis replaces the old `simulate` hook. A backend gets each group as a function that builds its composer (optionally valid in a given window), and returns each group's logs **or error**. It never drops results, and the round each result belongs to is kept.\n\n`simulateRounds` returns one entry per round, so `atRounds` can say which value came from which round. Outcomes carry simulate's `groupUsage` or a query's `cost`, for debug."
+    },
+    {
+      "title": "Detecting a dtalgorand node",
+      "file": "src/templates/runtime.ts",
+      "line": 522,
+      "description": "`auto` uses dtalgorand's extensions only if:\n\n1. algokit-utils is the fork (`algorand.simulate` exists),\n2. algosdk is the fork (`DTAlgodClient.features` has `capabilities`), and\n3. the node reports its capabilities (`GET /v2/capabilities`, read through `DTAlgodClient.capabilities()` in `gkFetchLimits`, just above).\n\nEach is one check, made once: stock algod answers 404 to step 3, and no request is checked for signs of stock algod after that.\n\nThe capabilities also give the node's optional features: queries (`query`, absent when they're off), several groups per simulate (`simulate.maxTxnGroups` above 1) and time travel (`timeTravel`). With `query`, `auto` queries."
+    },
+    {
+      "title": "Stock backend",
+      "file": "src/templates/runtime.ts",
+      "line": 532,
+      "description": "One `composer.simulate({ skipSignatures: true })` per group, at most 8 at a time. At a pinned round each group is valid only in block `round + 1`, so `block` can read the ~1,000 blocks up to the round. `atRounds` simulates each group at each round.\n\nOn a stock node only the last few rounds work. On a dtalgorand node with stock utils any round works, but without the protocol override."
+    },
+    {
+      "title": "dtalgorand backend",
+      "file": "src/templates/runtime.ts",
+      "line": 586,
+      "description": "Uses the fork's `algorand.simulate.groups`. The groups of a request run one after another in one block (a failed one is rolled back), so the backend:\n\n- cuts the groups into requests of at most `maxTxnGroups` (the fork won't split groups that run in sequence), up to 4 at a time, pinning the latest round first when there are several;\n- sends identical groups once, since a transaction can't appear twice in a block;\n- fails a request's groups, not the call, when the node refuses it (e.g. a round it doesn't have), so `atRounds` fails only that round.\n\n`atRounds` sends one request per round. Fees add up for the reader: see `ghostFee 'max'`.\n\ndt5 removed simulate's `rounds`, `parallel-groups`, validity window modes and `protocol` (the node answers 400), so this backend sends none of them; reads at many rounds or under another protocol are what queries are for."
+    },
+    {
+      "file": "src/templates/runtime.ts",
+      "line": 732,
+      "title": "Query backend",
+      "description": "## `ghostkitQueryBackend`\n\nSends groups through the fork's `algorand.query.run` (`POST /v2/query`): it builds the groups, checks every transaction is a plain NoOp app call (else it throws `GhostkitQueryUnsupported`), groups the app calls by target (the ghost program and schema, or the app, and the sender; normally one) and sends one `run` per target with every round. `run` splits by the node's `maxCalls` / `maxRounds` / `maxTotalCalls` / body size and splits and resends requests whose results are too large or that run over the node's time limit (a 504, never retried); busy 503s and 429s are retried by the HTTP client, not by `run`.\n\nResults map back by position: a round error fails every group at that round (`kind: 'round'`), else a group's first failed app call fails it, with `failedAt`. The protocol defaults to `round`, the round's own, as simulate always runs.\n\nIts `limits` are the node's simulate limits, for fees and hints if a run falls back to simulate; chunks are sized for simulated groups, so a fallback fits."
+    },
+    {
+      "title": "Decoding",
+      "file": "src/templates/runtime.ts",
+      "line": 962,
+      "description": "This is the same decoding as before, but the last log is now checked to be the ABI return (`0x151f7c75…`) instead of being dropped blindly."
+    },
+    {
+      "title": "Shared caches",
+      "file": "src/templates/runtime.ts",
+      "line": 1036,
+      "description": "## Caching\n\nWhat ghostkit learns about a node is cached per **AlgorandClient**: suggested params, the fee sink, the detected node and limits, and the reader's spendable balance.\n\nEvery generated SDK inlines its own copy of the runtime, so the cache lives on a global registry (`Symbol.for('ghostkit.clientCaches.v2')`, below). SDKs of different contracts, such as reti and abel, share it. Failed requests aren't cached. The key went to v2 when the cached node and limits gained `query`."
+    },
+    {
+      "title": "GhostkitBase",
+      "file": "src/templates/runtime.ts",
+      "line": 1056,
+      "description": "The base of every generated SDK. Views made by `atRound` and `batch` are `Object.create(this)` with a pinned round or a call collector. They share the instance's state, so the base uses no `#private` fields."
+    },
+    {
+      "title": "atRound",
+      "file": "src/templates/runtime.ts",
+      "line": 1102,
+      "description": "`sdk.atRound(R).method(...)` returns the same `T[]` as a normal call, simulated as of the end of round R. The old `extraSimulateArgs.round` still works and means the same."
+    },
+    {
+      "title": "atRounds",
+      "file": "src/templates/runtime.ts",
+      "line": 1120,
+      "description": "```ts\nawait sdk.atRounds([20_000_000n, 40_000_000n], (s) => s.acctBalanceData({ ... }))\n```\n\nThe callback returns the calls' promises, unawaited, and they're collected rather than run. Each round returns `{ round, ok, value | error, protocolOverride }`, and `value` is a tuple when the callback returns several calls."
+    },
+    {
+      "title": "batch",
+      "file": "src/templates/runtime.ts",
+      "line": 1148,
+      "description": "```ts\nconst [a, b] = await sdk.batch((s) => [s.m1(...), s.m2(...)])\n```\n\nOne request on a dtalgorand node, or concurrent requests on a stock node. Each collected promise is settled individually, and `batch` rejects with the first failure."
+    },
+    {
+      "title": "Running or collecting a call",
+      "file": "src/templates/runtime.ts",
+      "line": 1185,
+      "description": "Outside `batch`/`atRounds`, a call runs now. Inside, it registers a pending call and returns its promise. Setting `extraSimulateArgs` inside a collector **throws synchronously**, so `batch()` rejects with that message instead of a misleading one; an earlier version left an unhandled rejection here."
+    },
+    {
+      "title": "Choosing a backend",
+      "file": "src/templates/runtime.ts",
+      "line": 1245,
+      "description": "Detection goes through the per-client cache (`getNode`), so it costs one request per AlgorandClient. `auto` picks the query backend when the node has `query`, else the multi-group simulate on a dtalgorand node, else stock.\n\n`backend: 'query'` and `'dt'` are forced: they throw without the forks or on stock algod, and `'query'` also on a node with queries off. Nothing falls back at run time."
+    },
+    {
+      "title": "The reader",
+      "file": "src/templates/runtime.ts",
+      "line": 1272,
+      "description": "The reader is `readerAccount` if set. Otherwise it's the fee sink: known by genesis hash for MainNet and TestNet (`GK_KNOWN_FEE_SINKS`, no request), else read from `/genesis` once per client.\n\nQueries don't need it: they're sent from the zero address, which the node runs as the round's fee sink, unless `readerAccount` is set or a method has an ABI `account` argument (index 0 is the sender)."
+    },
+    {
+      "title": "Suggested params",
+      "file": "src/templates/runtime.ts",
+      "line": 1290,
+      "description": "## `_gkParams`\n\nThe old code overwrote the user's AlgorandClient params cache with a 75 ms expiry, which made **more** requests than the client's own 3 s cache. Now params:\n\n- come from `algorand.getSuggestedParams()`, so the client's cache still applies, and ghostkit never writes to it\n- are reused for up to `cacheParamsTimeout` at the latest round, and at **any age** at past rounds, which set their own validity\n- are fetched once for concurrent callers"
+    },
+    {
+      "title": "Ghost composers",
+      "file": "src/templates/runtime.ts",
+      "line": 1307,
+      "description": "Ghost groups are built on ghostkit's own `TransactionComposer`, which gets its params from `_gkParams`, instead of `algorand.newGroup()`."
+    },
+    {
+      "title": "Preparing a call",
+      "file": "src/templates/runtime.ts",
+      "line": 1346,
+      "description": "Turns a method's input into groups: one group for the given args (as before), or chunks when `chunk` applies. The groups are functions, built when the backend asks for them, because the dtalgorand backend builds them again for each window of rounds."
+    },
+    {
+      "title": "Fees per group",
+      "file": "src/templates/runtime.ts",
+      "line": 1384,
+      "description": "## `feesFor`\n\nSimulate checks fees and can't skip them, and since v42 a group owes for large programs and args and for every inner transaction it issues. Nothing is paid for a simulate, so the first app call offers a generous budget:\n\n- **fixed** (default 1 Algo): the first call pays it\n- **max**: the first call pays all the reader can spend, less the ghost apps' minimum balance and the other calls' own fees; the others pay 0\n- **min**: the minimum fee\n\nCalls that set their own fee keep it."
+    },
+    {
+      "title": "Ghost create from bytecode",
+      "file": "src/templates/runtime.ts",
+      "line": 1417,
+      "description": "This replaces the old `@ts-ignore` mutation of built transactions. The ghost app is created with `addAppCreateMethodCall` and the compiled bytes (no compile request), with the extra pages from `GHOST_META`. Unlike transactions added with `addTransaction`, these get the validity windows the dtalgorand simulate builds for each round."
+    },
+    {
+      "title": "Chunking",
+      "file": "src/templates/runtime.ts",
+      "line": 1464,
+      "description": "## `_gkChunk`\n\nSplits one call's array argument across app calls and groups:\n\n- **per app call**: app arg bytes (4,096, or 16,384 for a ghost that needs v42) less the selector, the other arguments and the length prefix, divided by the item size; the array is one app arg, so at most 4,096 bytes\n- **per group**: 16 app calls × 8 unnamed resources (the consensus limits; dt5 dropped the node's multiplier), divided by `refsPerItem`\n- plus `maxPerTxn` / `maxPerGroup`\n\nFor 300 addresses: 3 groups (`127 + 1`, `127 + 1`, `44`) on any node."
+    },
+    {
+      "title": "ghostFee 'max'",
+      "file": "src/templates/runtime.ts",
+      "line": 1613,
+      "description": "The reader's spendable balance. On a node with time travel it's read at the simulated round, through dt-algosdk, which checks the node answered for that round (`X-Algod-TT-Round`), and cached for good. Other nodes give the latest balance. If the read fails, the call pays the minimum fee and warns. With `atRounds`, the fee is the least the reader can spend at any round. This is opt-in, since it costs a request."
+    },
+    {
+      "file": "src/templates/runtime.ts",
+      "line": 1534,
+      "title": "Query or simulate",
+      "description": "## `_gkRun`\n\nOn the query backend, `_gkQueryBlocker` first decides whether the run must be simulated: execution traces, more budget or log bytes than a query call gets, or `extraMethodCallArgs` a query can't express. `auto` then uses the multi-group simulate; `backend: 'query'` throws.\n\nIf the query fails, `_gkQueryFallback` decides: `GhostkitQueryUnsupported`, a 400 for a round after the node's latest (which fails the whole query but only that round in a simulate), and a 400 for too many calls in total, simulate this run. Aborts and other errors, other 400s included, are thrown.\n\nSimulate can't run under another protocol, so a call that sets `protocol` and ends up on a built-in simulate backend throws, and a failed query of such a call is thrown rather than simulated."
+    },
+    {
+      "title": "Running",
+      "file": "src/templates/runtime.ts",
+      "line": 1661,
+      "description": "Merges the simulate defaults, picks the protocol, builds the fee plan (with `ghostFee: 'max'` on the dt backend, a share per group of a request) and groups, runs the backend, and maps outcomes back to calls (`groupCount` each) and rounds. On the query backend there's no fee plan and no suggested params: groups are built with placeholder params (`GK_QUERY_PARAMS`), which a query ignores.\n\nWith `debug`, the `post` line reports simulate's `group-usage` and the fee it means on chain (`feeNeeded`), or the queries' `cost`, and a `fallback` line says why a call went to simulate."
+    },
+    {
+      "title": "Protocol override",
+      "file": "src/templates/runtime.ts",
+      "line": 1671,
+      "description": "Past rounds on the query backend run under `latest` unless `protocol` is given (`null` for each round's own protocol). Each round's result carries the node's `protocolOverride` with its notes. Simulate runs each round under its own protocol, so nothing is set for it."
+    },
+    {
+      "title": "Error hints",
+      "file": "src/templates/runtime.ts",
+      "line": 1761,
+      "description": "A `GhostkitError` names the method and round, and adds a hint for the usual causes:\n\n- fee shortfalls (what was paid, or what the reader could spend)\n- overspend (the reader isn't funded at the round)\n- an AVM version too new for the round (queries run it under the latest protocol; simulate can't)\n- old rounds on a stock node, or on a node without time travel"
+    },
+    {
+      "title": "Generated output",
+      "file": "examples/GhostofavmSDK.ts",
+      "line": 1212,
+      "description": "The regenerated example: the typed client, then the inlined runtime from here, then `GhostofavmSDK` at the end."
+    },
+    {
+      "title": "Two builds of algokit-utils",
+      "file": "vitest.config.mts",
+      "line": 5,
+      "description": "Each suite runs twice: with the fork, and with `@algorandfoundation/algokit-utils` aliased to stock 9.2.2. The alias names the **package**, not a path, so its exports map keeps every module in one format. A path alias mixed CJS and ESM and loaded two copies of algosdk."
+    },
+    {
+      "title": "Fixtures",
+      "file": "test/global-setup.ts",
+      "line": 33,
+      "description": "SDKs generated for the tests:\n\n- `GhostV11`: the example\n- `GhostV13`: the example's TEAL compiled with `#pragma version 13` (`goal clerk compile`), committed in `test/fixtures/`. Changing the version byte of AVM 11 bytecode isn't valid: branch encoding changed.\n- `GhostBig`: V13 padded past 3 extra pages\n- `GhostChunk`: with a `@ghostkit-chunk` tag"
+    },
+    {
+      "title": "Fake backend",
+      "file": "test/helpers.ts",
+      "line": 75,
+      "description": "The offline tests use a backend that builds the real groups and runs the example ghost in JS (`runExampleGhost`, above), so tests can check fees, validity, chunk sizes and decoding without a node.\n\n`fakeQuery` and `fakeSimulate` (below) answer the fork's `algorand.query.run` and `algorand.simulate` the same way, for the query tests, which run the real detection against a stub node that reports query limits."
+    },
+    {
+      "title": "Fee and caching tests",
+      "file": "test/runtime.spec.ts",
+      "line": 472,
+      "description": "Request-count tests: params are fetched once for concurrent SDKs and calls, the client's cache is untouched, params are refetched after `cacheParamsTimeout` only at the latest round, and past rounds reuse them. Here a stub node checks detection from its capabilities, one `/v2/capabilities` request per client, no genesis request on MainNet, and the `'max'` fee plan."
+    },
+    {
+      "title": "Live: stock node",
+      "file": "test/ghost.live.ts",
+      "line": 33,
+      "description": "LocalNet (consensus v42): the default reader, pinned block reads, batching, the hint for old rounds, AVM 13, more than 3 extra pages (and the failure with minimum fees), an unfunded reader, and chunking 300 accounts."
+    },
+    {
+      "title": "Live: dtalgorand node",
+      "file": "test/ghost.live.ts",
+      "line": 123,
+      "description": "A MainNet dtalgorand node: balances at rounds years apart match the node's `?round=` reads; block reads are relative to each round; batching at a past round; with queries, AVM 13 at round 20M under the override (without them, rounds whose own protocol runs the ghost); chunking 400 accounts. On a node with queries, queries match the multi-group simulate, an unfunded reader works, and a ghost over 8 KB runs.\n\nWhether the node has queries comes from `GET /v2/capabilities`. Run it against a node with queries and one without."
+    },
+    {
+      "title": "Docs",
+      "file": "README.md",
+      "line": 389,
+      "description": "The README covers past rounds, batching, fees, chunking, nodes and libraries, and **requests and caching** (this section), plus migration notes for 0.0.x users at the end."
+    }
+  ]
+}

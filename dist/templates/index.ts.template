@@ -1,157 +1,25 @@
 /* BEGIN GHOST SDK CODE */
 
-import { getABIDecodedValue } from '@algorandfoundation/algokit-utils/types/app-arc56'
-import { CommonAppCallParams } from '@algorandfoundation/algokit-utils/types/composer'
-import { ABIMethod, makeEmptyTransactionSigner } from 'algosdk'
-
-const emptySigner = makeEmptyTransactionSigner()
-
-type ExtraMethodCallArgs = Omit<CommonAppCallParams, 'appId' | 'sender' | 'method' | 'args' | 'onComplete'>
-
 type Methods = {{ARC56_NAME}}Types['methods']
 
-class GhostBase {
+/** Facts about the ghost program, from ghostkit. */
+export const GHOST_META: GhostkitMeta = {{GHOST_META}}
+
+/**
+ * Reads data with the {{ARC56_NAME}} ghost contract: each method creates the contract on the fly in a simulate and
+ * decodes what it logs. See https://github.com/d13co/ghostkit#readme
+ */
+export class {{ARC56_NAME}}SDK extends GhostkitBase<{{ARC56_NAME}}Factory, {{ARC56_NAME}}Client> {
   static factory = {{ARC56_NAME}}Factory
   static client = {{ARC56_NAME}}Client
 
-  public algorand: AlgorandClient
-  public readerAccount = 'A7NMWS3NT3IUDMLVO26ULGXGIIOUQ3ND2TXSER6EBGRZNOBOUIQXHIBGDE' // non-mainnet fee sink
-  public ghostAppId?: bigint
-  public factory: {{ARC56_NAME}}Factory
-  protected client: {{ARC56_NAME}}Client
-  public cacheParamsTimeout = 75 // ms
-  public debug: boolean = false
-
-  constructor({
-    algorand,
-    readerAccount,
-    ghostAppId,
-    debug
-  }: {
-    algorand: AlgorandClient
-    readerAccount?: string
-    ghostAppId?: bigint
-    debug?: boolean
-  }) {
-    this.algorand = algorand
-    if (readerAccount) this.readerAccount = readerAccount
-    this.factory = this.algorand.client.getTypedAppFactory({{ARC56_NAME}}Factory, {
-      defaultSender: this.readerAccount,
+  constructor(params: GhostkitSDKParams) {
+    super(params, {
+      appSpec: APP_SPEC,
+      meta: GHOST_META,
+      createFactory: (algorand, defaultSender) => algorand.client.getTypedAppFactory({{ARC56_NAME}}Factory, { defaultSender }),
+      createClient: (factory, appId) => factory.getAppClientById({ appId }),
     })
-    this.ghostAppId = ghostAppId
-    this.client = this.factory.getAppClientById({ appId: ghostAppId ?? 13n })
-    this.debug = debug ?? false
-  }
-
-  protected async getAndCacheSuggestedParams() {
-    const suggestedParams = await this.algorand.getSuggestedParams()
-    if (this.cacheParamsTimeout) {
-      this.algorand.setSuggestedParamsCache(suggestedParams, new Date(Date.now() + this.cacheParamsTimeout))
-    }
-    return suggestedParams
-  }
-
-  protected async execute<T>({
-    signature,
-    txnBuilder,
-    methodArgsOrArgsArray,
-    extraMethodCallArgs,
-    extraSimulateArgs,
-  }: {
-    signature: string
-    txnBuilder: (builder: {{ARC56_NAME}}Composer<any>, args: any /* TODO */) => {{ARC56_NAME}}Composer<any>
-    methodArgsOrArgsArray: any
-    extraMethodCallArgs?: ExtraMethodCallArgs | ExtraMethodCallArgs[]
-    extraSimulateArgs?: RawSimulateOptions
-  }): Promise<T[]> {
-    await this.getAndCacheSuggestedParams()
-    const methodName = signature.slice(0, signature.indexOf('('))
-
-    const debugInfo = this.debug ? { reqId: Math.random().toString(36).substring(2, 10), txns: 0, argCount: [] as any } : undefined
-    const debugCountArgs = (args: Record<string, any>) => debugInfo && debugInfo.argCount.push(Object.entries(args).map(([arg, value]) => ({ [arg]: Array.isArray(value) ? value.length : 1 })))
-
-    let builder: {{ARC56_NAME}}Composer<any> = this.client.newGroup()
-    if (this.ghostAppId) {
-      // deployed variant, we can call directly
-      const argsArray = Array.isArray(methodArgsOrArgsArray) ? methodArgsOrArgsArray : [methodArgsOrArgsArray]
-      for (let i=0; i < argsArray.length; i++) {
-        const args = argsArray[i]
-        if (debugInfo) debugCountArgs(args)
-        const extra = Array.isArray(extraMethodCallArgs) ? extraMethodCallArgs[i] : extraMethodCallArgs
-        builder = txnBuilder(builder, { args, signer: emptySigner, ...extra })
-      }
-    } else {
-      // ghost variant
-      // Avoiding .createTransaction because it compiles on the fly (why?). build app args and convert to app create
-      let throwawayBuilder: {{ARC56_NAME}}Composer<any> = this.client.newGroup()
-      const argsArray = Array.isArray(methodArgsOrArgsArray) ? methodArgsOrArgsArray : [methodArgsOrArgsArray]
-      for (let i=0; i < argsArray.length; i++) {
-        const args = argsArray[i]
-        if (debugInfo) debugCountArgs(args)
-        const extra = Array.isArray(extraMethodCallArgs) ? extraMethodCallArgs[i] : extraMethodCallArgs
-        throwawayBuilder = txnBuilder(throwawayBuilder, { args, signer: emptySigner, ...extra })
-      }
-      const { transactions } = await (await throwawayBuilder.composer()).buildTransactions()
-
-      // convert to app creates, copy to new real builder
-      for (const txn of transactions) {
-        // @ts-ignore
-        txn.applicationCall = {
-          ...txn.applicationCall,
-          appIndex: 0,
-          approvalProgram: Buffer.from(APP_SPEC.byteCode!.approval, 'base64'),
-          clearProgram: Buffer.from(APP_SPEC.byteCode!.clear, 'base64'),
-          numGlobalByteSlices: APP_SPEC.state.schema.global.bytes,
-          numGlobalInts: APP_SPEC.state.schema.global.ints,
-          numLocalByteSlices: APP_SPEC.state.schema.local.bytes,
-          numLocalInts: APP_SPEC.state.schema.local.ints,
-          extraPages: 3,
-        }
-        builder = builder.addTransaction(txn, emptySigner)
-        if (debugInfo) debugInfo.txns += 1
-      }
-    }
-    if (debugInfo) console.warn(`[DEBUG] Ghostkit pre id=${debugInfo.reqId} m=${methodName} target=${this.ghostAppId ?? "ghost"} txns=${debugInfo.txns} ${JSON.stringify(debugInfo.argCount)}`)
-    const simStartTime = debugInfo ? performance.now() : undefined
-    const { confirmations } = await builder.simulate({
-      extraOpcodeBudget: 170_000,
-      allowMoreLogging: true,
-      allowEmptySignatures: true,
-      allowUnnamedResources: true,
-      ...extraSimulateArgs,
-    })
-    const simEndTime = debugInfo ? performance.now() : undefined
-
-    const logs = confirmations.flatMap(({ logs }, i) => {
-      if (!logs) throw new Error(`logs were not returned from simulate txn ${i}. this should never happen`)
-      return logs.slice(0, -1)
-    })
-
-    const specRetObj = this.client.appSpec.methods.find((m) => new ABIMethod(m).getSignature() === signature)?.returns
-    if (!specRetObj) throw new Error(`Method not found in app spec: ${signature}`)
-
-    const retTypeStr = specRetObj.struct ?? specRetObj.type
-    const retData: T[] = []
-
-    for (let i = 0; i < logs.length; i++) {
-      retData.push(getABIDecodedValue(new Uint8Array(logs[i]), retTypeStr, this.factory.appSpec.structs) as T)
-    }
-
-    const procEndTime  = debugInfo ? performance.now() : undefined
-    if (debugInfo) {
-      const simDuration = (simEndTime! - simStartTime!).toFixed(2)
-      const procDuration = (procEndTime! - simEndTime!).toFixed(2)
-      const totalDuration = (procEndTime! - simStartTime!).toFixed(2)
-      console.warn(`[DEBUG] Ghostkit post id=${debugInfo.reqId} m=${methodName} tSim=${simDuration}ms tProc=${procDuration}ms t=${totalDuration}ms`)
-    }
-
-    return retData
-  }
-}
-
-export class {{ARC56_NAME}}SDK extends GhostBase {
-  constructor(args: ConstructorParameters<typeof GhostBase>[0]) {
-    super(args)
   }
 
 {{METHODS}}

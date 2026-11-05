@@ -1,0 +1,98 @@
+import { mkdirSync, readFileSync, writeFileSync } from 'fs'
+import { join } from 'path'
+import { describe, expect, test, vi } from 'vitest'
+import { buildGhostSDK, getGhostMeta, parseChunkTag, readProgramVersion } from '../src/build'
+
+type Spec = Parameters<typeof getGhostMeta>[0]
+const read = (path: string) => JSON.parse(readFileSync(join(process.cwd(), path), 'utf8')) as Spec
+const example = read('examples/Ghostofavm.arc56.json')
+const v13 = read('test/fixtures/GhostV13.arc56.json')
+const dir = join(process.cwd(), 'test/generated/build')
+mkdirSync(dir, { recursive: true })
+
+const withApprovalSize = (spec: Spec, size: number): Spec => {
+  const program = Buffer.alloc(size)
+  Buffer.from(spec.byteCode!.approval, 'base64').copy(program)
+  return { ...spec, byteCode: { ...spec.byteCode!, approval: program.toString('base64') } }
+}
+
+async function build(spec: Spec) {
+  const path = join(dir, `${spec.name}.arc56.json`)
+  writeFileSync(path, JSON.stringify(spec))
+  return readFileSync(await buildGhostSDK(path, { warn: () => {} }), 'utf8')
+}
+
+describe('ghost program facts', () => {
+  test('reads the AVM version and sizes', () => {
+    expect(getGhostMeta(example)).toEqual({ avmVersion: 11, extraProgramPages: 0, approvalBytes: 423, clearBytes: 4 })
+    expect(getGhostMeta(v13).avmVersion).toBe(13)
+  })
+
+  test('reads a multi-byte version varuint', () => {
+    expect(readProgramVersion(Uint8Array.from([0x81, 0x01]))).toBe(129)
+  })
+
+  test('counts extra pages, warns beyond 3 and rejects beyond 7', () => {
+    const warn = vi.fn()
+    expect(getGhostMeta(withApprovalSize(v13, 2048 * 4 + 1), warn).extraProgramPages).toBe(4)
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/4 extra program pages need consensus v42/))
+    expect(getGhostMeta(withApprovalSize(v13, 2048 * 8 - 7)).extraProgramPages).toBe(7)
+    expect(() => getGhostMeta(withApprovalSize(v13, 2048 * 8))).toThrow(/more than the 16384/)
+  })
+})
+
+describe('@ghostkit-chunk', () => {
+  const method = (desc: string) => ({ ...example.methods.find((m) => m.name === 'acctBalanceData')!, desc })
+
+  test('reads the argument and options', () => {
+    expect(parseChunkTag(method('Balances.\n@ghostkit-chunk accounts refsPerItem=2 maxPerGroup=100'))).toEqual({
+      arg: 'accounts',
+      refsPerItem: 2,
+      maxPerGroup: 100,
+    })
+    expect(parseChunkTag(method('no tag'))).toBeUndefined()
+  })
+
+  test('rejects unknown options and arguments that are not dynamic arrays', () => {
+    expect(() => parseChunkTag(method('@ghostkit-chunk accounts size=2'))).toThrow(/unknown @ghostkit-chunk option size/)
+    expect(() => parseChunkTag(method('@ghostkit-chunk nope'))).toThrow(/not one of its arguments/)
+    const blk = { ...example.methods.find((m) => m.name === 'blkData')!, desc: '@ghostkit-chunk firstRound' }
+    expect(() => parseChunkTag(blk)).toThrow(/not a dynamic array/)
+  })
+
+  test('reads the tag in backticks, the form puya-ts keeps in a description', () => {
+    expect(parseChunkTag(method('Balances. `@ghostkit-chunk accounts maxPerGroup=100`'))).toEqual({ arg: 'accounts', maxPerGroup: 100 })
+  })
+})
+
+describe('buildGhostSDK', () => {
+  test('writes the chunk default and the description without the tag', async () => {
+    const source = await build({
+      ...example,
+      name: 'Documented',
+      methods: example.methods.map((m) => (m.name === 'acctBalanceData' ? { ...m, desc: 'Balance data.\n@ghostkit-chunk accounts' } : m)),
+    })
+    expect(source).toContain(`chunk: {"arg":"accounts"}`)
+    expect(source).toMatch(/\/\*\*\n {3}\* Balance data\.\n {3}\*\/\n {2}acctBalanceData\(/)
+    expect(source).toContain('export const GHOST_META: GhostkitMeta = {"avmVersion":11,"extraProgramPages":0')
+
+    const ticked = await build({
+      ...example,
+      name: 'Ticked',
+      methods: example.methods.map((m) => (m.name === 'acctBalanceData' ? { ...m, desc: 'Balance data. `@ghostkit-chunk accounts refsPerItem=2`' } : m)),
+    })
+    expect(ticked).toContain(`chunk: {"arg":"accounts","refsPerItem":2}`)
+    expect(ticked).toMatch(/\/\*\*\n {3}\* Balance data\.\n {3}\*\/\n {2}acctBalanceData\(/)
+  })
+
+  test('rejects methods named like SDK members', async () => {
+    const methods = example.methods.map((m, i) => (i === 0 ? { ...m, name: 'batch' } : m))
+    await expect(build({ ...example, name: 'Reserved', methods })).rejects.toThrow(/batch is a member of every ghostkit SDK/)
+  })
+
+  test('rejects overloads', async () => {
+    const [first] = example.methods
+    const overload = { ...first, args: [first.args[0]] }
+    await expect(build({ ...example, name: 'Overloaded', methods: [...example.methods, overload] })).rejects.toThrow(/doesn't support overloads/)
+  })
+})

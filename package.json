@@ -1,7 +1,7 @@
 {
   "name": "ghostkit",
-  "version": "0.0.8",
-  "description": "",
+  "version": "0.1.0-dt.7",
+  "description": "Generate typed SDKs for ghost contracts: Algorand contracts that are simulated, never deployed",
   "files": [
     "dist/"
   ],
@@ -18,21 +18,31 @@
   "homepage": "https://github.com/d13co/ghostkit#readme",
   "scripts": {
     "build": "tsc",
-    "postbuild": "copyfiles -f src/templates/* dist/templates/ && npm run build:example",
+    "prepublishOnly": "npm run build",
+    "postbuild": "copyfiles -f src/templates/*.template src/templates/runtime.ts dist/templates/ && npm run build:example",
     "build:example": "node dist/bin.js build examples/Ghostofavm.arc56.json",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "check:example": "tsc -p tsconfig.example.json && tsc -p tsconfig.example-stock.json",
+    "test": "vitest run --project unit --project unit-stock-utils",
+    "test:live": "vitest run --project live --project live-stock-utils"
   },
   "author": "",
   "license": "ISC",
   "devDependencies": {
-    "@algorandfoundation/algokit-client-generator": "^6.0.0",
     "@types/node": "^24.7.1",
     "concurrently": "=9.2.1",
     "copyfiles": "=2.4.1",
-    "typescript": "=5.9.3"
+    "typescript": "=5.9.3",
+    "algokit-utils-stock": "npm:@algorandfoundation/algokit-utils@9.2.2",
+    "vitest": "^4.1.11"
   },
   "dependencies": {
-    "@algorandfoundation/algokit-utils": "^9.1.2",
-    "algosdk": "^3.5.2"
+    "@algorandfoundation/algokit-client-generator": "^6.0.0",
+    "@algorandfoundation/algokit-utils": "npm:@d13co/dt-algokit-utils@9.2.3-dt.5.2.0.0",
+    "algosdk": "npm:dt-algosdk@3.9.0-dt.5.2.0.0",
+    "change-case": "^5.4.4"
+  },
+  "overrides": {
+    "@algorandfoundation/algokit-utils": "$@algorandfoundation/algokit-utils",
+    "algosdk": "$algosdk"
   }
 }
