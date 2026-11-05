@@ -37,7 +37,7 @@
   },
   "dependencies": {
     "@algorandfoundation/algokit-client-generator": "^6.0.0",
-    "@algorandfoundation/algokit-utils": "file:./vendor/d13co-dt-algokit-utils-9.2.3-dt.5.2.0.0.tgz",
+    "@algorandfoundation/algokit-utils": "npm:@d13co/dt-algokit-utils@9.2.3-dt.5.2.0.0",
     "algosdk": "npm:dt-algosdk@3.9.0-dt.5.2.0.0",
     "change-case": "^5.4.4"
   },

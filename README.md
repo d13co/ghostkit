@@ -498,12 +498,12 @@ npm i ghostkit@alpha
 
 To use the dtalgorand forks in your project, install them under the stock names, pinned exactly, and override them across the whole dependency tree so that your project loads one copy of each: `@d13co/dt-algokit-utils` `9.2.3-dt.5.2.0.0` and `dt-algosdk` `3.9.0-dt.5.2.0.0`, for dtalgorand dt5 (`v5.0.5-dt5`). Ghostkit supports the current dtalgorand release only, not nodes or forks of earlier ones.
 
-`dt-algosdk` is on npm. Until `@d13co/dt-algokit-utils` is too, install it from a tarball in your project (ghostkit's is in its `vendor/`):
+For example, in `package.json`:
 
 ```json
 {
   "dependencies": {
-    "@algorandfoundation/algokit-utils": "file:./vendor/d13co-dt-algokit-utils-9.2.3-dt.5.2.0.0.tgz",
+    "@algorandfoundation/algokit-utils": "npm:@d13co/dt-algokit-utils@9.2.3-dt.5.2.0.0",
     "algosdk": "npm:dt-algosdk@3.9.0-dt.5.2.0.0"
   },
   "overrides": {
@@ -513,13 +513,11 @@ To use the dtalgorand forks in your project, install them under the stock names,
 }
 ```
 
-Once it is published, use `npm:@d13co/dt-algokit-utils@9.2.3-dt.5.2.0.0` in place of the tarball.
-
 With pnpm, put the same two entries under `overrides` in `pnpm-workspace.yaml` (or `pnpm.overrides` in `package.json`); with yarn, under `resolutions`. The forks' versions are prereleases, which `^` ranges don't match, so pin them exactly. Don't use `--legacy-peer-deps` or `--force` for a peer conflict: it means an override is missing, and those flags install a second, stock copy. Check with `npm ls algosdk @algorandfoundation/algokit-utils` that only the forks are installed. See [Installing the fork](https://github.com/d13co/dt-algokit-utils-ts#installing-the-fork).
 
 ### Development
 
-Ghostkit installs the dtalgorand forks the same way, in `package.json`'s `dependencies` and `overrides`: dt-algosdk from npm, and dt-algokit-utils from the tarball in `vendor/` until it is on npm.
+Ghostkit installs the dtalgorand forks the same way, in `package.json`'s `dependencies` and `overrides`.
 
 - `npm run build`: compiles ghostkit and regenerates `examples/GhostofavmSDK.ts`.
 - `npm run check:example`: type-checks the example SDK and the tests against the fork of algokit-utils, and the example SDK against stock algokit-utils.
