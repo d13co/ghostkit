@@ -490,10 +490,8 @@ The generated SDK imports only `@algorandfoundation/algokit-utils` (9.x, stock o
 
 ### Install ghostkit
 
-To install ghostkit on your own project, you must currently use the alpha channel:
-
 ```bash
-npm i ghostkit@alpha
+npm i ghostkit
 ```
 
 To use the dtalgorand forks in your project, install them under the stock names, pinned exactly, and override them across the whole dependency tree so that your project loads one copy of each: `@d13co/dt-algokit-utils` `9.2.3-dt.5.2.0.0` and `dt-algosdk` `3.9.0-dt.5.2.0.0`, for dtalgorand dt5 (`v5.0.5-dt5`). Ghostkit supports the current dtalgorand release only, not nodes or forks of earlier ones.
@@ -525,6 +523,20 @@ Ghostkit installs the dtalgorand forks the same way, in `package.json`'s `depend
 - `npm run test:live`: live tests, once with each algokit-utils. Set `ALGOD_SERVER` (e.g. `http://localhost:4001`, a LocalNet on consensus v42) and/or `DT_ALGOD_SERVER` (a MainNet dtalgorand node with time travel); tokens in `ALGOD_TOKEN` / `DT_ALGOD_TOKEN`. Run the dtalgorand suite against a node with queries on and one with them off (`MaxAPIQueryCalls: 0`), to cover both queries and the multi-group simulate; the query-only tests skip on a node with queries off.
 
 The SDK's runtime is `src/templates/runtime.ts`, a regular module that ghostkit inlines into each generated SDK.
+
+### Releasing
+
+GitHub Actions tests and publishes ghostkit, with [`.github/workflows/ci.yml`](.github/workflows/ci.yml). On every push and pull request to `main` it builds, checks that the committed `dist/` and `examples/GhostofavmSDK.ts` are what the source builds, type-checks, runs the unit tests (offline) and checks the versions with `scripts/release-check.mjs`. The live tests need nodes, so run them yourself before a release. On a `v<version>` tag it also publishes the package to npm with provenance, as `latest`, and creates a GitHub release with the package tarball.
+
+1. Set the version: `npm version <version> --no-git-tag-version`. Ghostkit pins the dtalgorand forks exactly; when they change, update `dependencies` and the install snippet above together, since the check compares them.
+2. `npm run build`, `npm run check:example`, `npm test`, the live tests, and `npm pack --dry-run` to check the contents (`dist/` and `README.md`).
+3. Commit and push `main`, then tag the commit and push the tag: `git tag -s v<version>` and `git push origin v<version>`.
+4. The workflow checks that the tag is on `main` and names the version in `package.json` and `package-lock.json` (`node scripts/release-check.mjs v<version>` runs the same check locally), runs the checks and tests again, and publishes with `npm publish --tag latest`. npm publishes a prerelease such as `0.1.0-dt.7` only with an explicit tag. If the version is already on npm, the workflow skips publishing and only creates the GitHub release.
+
+One-time setup:
+
+- **Trusted publisher.** The workflow publishes only through npm trusted publishing, with no token. Add one in the package's settings on npmjs.com (Trusted publishing → GitHub Actions: owner `d13co`, repository `ghostkit`, workflow `ci.yml`, environment `npm`, publishing allowed), or with npm 11.5.1 or later: `npm trust github ghostkit --file ci.yml --repo d13co/ghostkit --env npm --allow-publish`. npm drops a new trusted publisher if nothing is published with it within 2 days, so set it up when the next release is close, or add it again later.
+- **Approval (optional).** The publish job runs in the GitHub environment `npm`, which GitHub creates on the first run. To approve each release by hand, add required reviewers to it under Settings → Environments.
 
 ### Migrating from 0.1.0-dt.6 (dtalgorand dt4)
 
