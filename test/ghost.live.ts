@@ -152,6 +152,19 @@ describe.skipIf(!dtServer)('dtalgorand node (MainNet)', () => {
     expect(node.kind === 'dt' && node.query !== undefined).toBe(fork && hasQuery)
   })
 
+  test('a round after the latest fails only that round, at once', async (ctx) => {
+    if (!fork || !hasQuery) ctx.skip()
+    const tip = (await algorand.client.algod.status().do()).lastRound
+    const started = Date.now()
+    const results = await sdk.atRounds([tip - 2n, tip + 1000n], (s) =>
+      s.blkTimestamp({ methodArgsOrArgsArray: { firstRound: tip - 5n, lastRound: tip - 5n } }),
+    )
+    expect(results.map((r) => r.ok)).toEqual([true, false])
+    expect(results[1].ok === false && results[1].error.message).toMatch(/is after the latest round/)
+    // a simulate of that round would get a 500 that the HTTP client retries for ~14 s
+    expect(Date.now() - started).toBeLessThan(5_000)
+  })
+
   test('queries give what the multi-group simulate gives', async (ctx) => {
     if (!fork || !hasQuery) ctx.skip()
     const feeSink = 'Y76M3MSY6DKBRHBL7C3NNDXGS5IIMQVQVUAB6MP4XEMMGVF2QWNPL226CA'

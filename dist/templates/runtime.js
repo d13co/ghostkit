@@ -489,18 +489,48 @@ function ghostkitQueryBackend(algorand, { limits = exports.GHOSTKIT_DT_DEFAULT_L
             return { target: t, call: targets[t].calls.push(gkQueryCallOf(txn)) - 1 };
         }));
         const protocol = options.protocol ?? 'round';
-        const results = await Promise.all(targets.map(({ target, calls }) => manager.run({ ...target, rounds, protocol, calls }, { signal, ...(concurrency ? { concurrency } : {}) })));
+        const runAt = (at) => Promise.all(targets.map(({ target, calls }) => manager.run({ ...target, rounds: at, protocol, calls }, { signal, ...(concurrency ? { concurrency } : {}) })));
+        // The node rejects a whole query for a round after its latest. Rather than simulate (which fails such a round too,
+        // and slowly: dt5 answers it with a 500 that clients retry), query the rounds it has and fail the later ones. The
+        // latest round comes from the node's message (else its status); a few tries cover nodes behind a balancer that differ.
+        let served = rounds.map((_, r) => r);
+        let late;
+        let results;
+        for (let tries = 0; !results; tries++) {
+            try {
+                results = served.length ? await runAt(served.map((r) => rounds[r])) : [];
+            }
+            catch (e) {
+                const message = gkStatus(e) === 400 ? gkErrorText(e) : '';
+                const match = /round \d+ is after the latest round(?: (\d+))?/.exec(message);
+                if (signal?.aborted || !match || tries === 3)
+                    throw e;
+                const latest = match[1] !== undefined ? BigInt(match[1]) : (await algorand.client.algod.status().do(undefined, signal ? { signal } : undefined)).lastRound;
+                const kept = served.filter((r) => rounds[r] <= latest);
+                // a node that rejects rounds it says it has would loop
+                if (kept.length === served.length)
+                    throw e;
+                served = kept;
+                late = { latest: late && late.latest < latest ? late.latest : latest, cause: e };
+            }
+        }
+        const slot = new Map(served.map((r, i) => [r, i]));
         return rounds.map((requested, r) => {
+            const at = slot.get(r);
+            if (at === undefined) {
+                const failure = { kind: 'round', failureMessage: `round ${requested} is after the latest round ${late.latest}`, cause: late.cause };
+                return { round: requested, groups: placement.map((_, g) => ({ ok: false, error: gkQueryGroupError(g, requested, failure) })) };
+            }
             // With several targets (not in normal ghostkit use: one program or app, one reader), each `run` pins the latest
             // round on its own, and the round reported is the first target's
-            const round = results[0][r].round;
+            const round = results[0][at].round;
             const outcomes = placement.map((txns, g) => {
-                const override = results[txns[0]?.target ?? 0][r].protocolOverride;
+                const override = results[txns[0]?.target ?? 0][at].protocolOverride;
                 const extra = override ? { protocolOverride: override } : {};
                 const logs = [];
                 let cost = 0;
                 for (let i = 0; i < txns.length; i++) {
-                    const outcome = results[txns[i].target][r].calls[txns[i].call];
+                    const outcome = results[txns[i].target][at].calls[txns[i].call];
                     if (!outcome.ok) {
                         const { error } = outcome;
                         const failureMessage = error.failureMessage ?? error.message;
@@ -514,7 +544,7 @@ function ghostkitQueryBackend(algorand, { limits = exports.GHOSTKIT_DT_DEFAULT_L
                 }
                 return { ok: true, logs, cost, ...extra };
             });
-            const override = results[0][r].protocolOverride;
+            const override = results[0][at].protocolOverride;
             return { round: requested === 0n ? round : requested, groups: outcomes, ...(override ? { protocolOverride: override } : {}) };
         });
     };
@@ -1171,10 +1201,10 @@ class GhostkitBase {
         return undefined;
     }
     /**
-     * Why `auto` simulates a run whose query failed with `e`, or undefined to throw. Three failures are only the query's:
-     * a group the query backend can't send; a round after the node's latest one, which fails a whole query request (400)
-     * but only that round of a simulate; and too many calls times rounds in a request (400), which an algokit-utils
-     * from before `maxTotalCalls` sends to a node that has it. The node's other 400s would fail the simulate too.
+     * Why `auto` simulates a run whose query failed with `e`, or undefined to throw. Two failures are only the query's: a
+     * group the query backend can't send, and too many calls times rounds in a request (400), which an algokit-utils from
+     * before `maxTotalCalls` sends to a node that has it. The node's other 400s would fail the simulate too; the query
+     * backend itself fails rounds after the node's latest one.
      */
     _gkQueryFallback(e) {
         const error = e;
@@ -1182,7 +1212,7 @@ class GhostkitBase {
             return error.message;
         if (gkStatus(e) === 400) {
             const message = gkErrorText(e);
-            if (/round \d+ is after the latest round/.test(message) || /too many calls in total/.test(message))
+            if (/too many calls in total/.test(message))
                 return `the node rejected the query: ${message}`;
         }
         return undefined;

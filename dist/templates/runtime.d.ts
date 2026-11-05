@@ -543,10 +543,10 @@ export declare class GhostkitBase<TFactory, TClient> {
     /** Why a run must be simulated rather than queried, or undefined if it can be queried. */
     private _gkQueryBlocker;
     /**
-     * Why `auto` simulates a run whose query failed with `e`, or undefined to throw. Three failures are only the query's:
-     * a group the query backend can't send; a round after the node's latest one, which fails a whole query request (400)
-     * but only that round of a simulate; and too many calls times rounds in a request (400), which an algokit-utils
-     * from before `maxTotalCalls` sends to a node that has it. The node's other 400s would fail the simulate too.
+     * Why `auto` simulates a run whose query failed with `e`, or undefined to throw. Two failures are only the query's: a
+     * group the query backend can't send, and too many calls times rounds in a request (400), which an algokit-utils from
+     * before `maxTotalCalls` sends to a node that has it. The node's other 400s would fail the simulate too; the query
+     * backend itself fails rounds after the node's latest one.
      */
     private _gkQueryFallback;
     /**

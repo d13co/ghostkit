@@ -302,6 +302,8 @@ A method's [chunk tag](#chunk-tag) sets its default `chunk`; `chunk: false` turn
 
 300 addresses become 3 groups (`127 + 1`, `127 + 1`, `44`: 128 unnamed resources per group): simulated concurrently on a stock node, and in one request on a dtalgorand node.
 
+Groups are sized for the current protocol, while a simulate runs each round under that round's protocol. Before consensus v41 (MainNet round 54,012,570), one box reference covered 1,024 bytes of box reads rather than 2,048, so items that read boxes over 1 KB need more references at those rounds. For example, reti's validator boxes fit 119 per group there, not 127. Queries have no limit on unnamed resources, so this affects only simulates: the `dt` backend, a node without queries, or a fallback. To simulate such rounds, count `refsPerItem` at 1,024 bytes per box reference, or lower `maxPerGroup`.
+
 With queries the chunks are sized the same way, so that a call that falls back to simulate fits too. A query runs each app call alone, with the node's `maxCallBudget` (320,000 by default) and no limit on unnamed resources, so anything sized for a simulated group fits.
 
 You can still split inputs yourself by passing a list to `methodArgsOrArgsArray`: each entry becomes an app call in one group.
@@ -324,7 +326,9 @@ Signatures are skipped: the reader account never signs. `extraSimulateArgs.proto
 - `extraOpcodeBudget` plus 700 per app call of the largest group is more than the node's `maxCallBudget` (the default 170,000 fits in 320,000);
 - `allowMoreLogging` is on (the default) and the node's `maxCallLogBytes` is less than simulate's 65,536;
 - `extraMethodCallArgs` sets a field a query can't (see [Extra method-call args](#extra-method-call-args-fees--validity)), or the method has transaction arguments;
-- the node rejects the query because a round is after its latest one (HTTP 400): a query fails as a whole, while a simulate fails only that round. The node's other rejections are thrown, since a simulate would fail the same way.
+- the node rejects a request over its `maxTotalCalls` (HTTP 400), which an algokit-utils from before that limit can send. The node's other rejections are thrown, since a simulate would fail the same way.
+
+When a call is queried, a round after the node's latest one isn't simulated. The node rejects a whole query for it (HTTP 400), so ghostkit takes the latest round from the node's message, queries the rounds up to it, and fails the later ones (`kind: 'round'`). A simulate fails such a round too, but slowly: dtalgorand dt5 answers it with a 500, which the HTTP client retries for about 14 s. That still happens on the simulate backends and when a call falls back to simulate for one of the reasons above, so read the latest round first if you probe near it that way.
 
 `backend: 'query'` throws for these instead, and so does a call that sets `protocol`, since simulate can't run under another protocol.
 

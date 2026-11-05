@@ -940,18 +940,85 @@ describe('with a stub node', () => {
       expect(results[1].ok === false && results[1].error.message).toMatch(/at round 20: round 20 is not available/)
     })
 
-    test("simulates a run at a round after the node's latest, and throws the node's other rejections", async () => {
+    const status = (lastRound: number) => ({
+      status: 200,
+      body: {
+        'catchup-time': 0,
+        'last-round': lastRound,
+        'last-version': 'v',
+        'next-version': 'v',
+        'next-version-round': lastRound + 1,
+        'next-version-supported': true,
+        'stopped-at-unsupported-round': false,
+        'time-since-last-round': 0,
+      },
+    })
+
+    test('a query with rounds after the latest fails only those rounds, without simulating', async () => {
+      routes['/v2/status'] = status(Number(LAST_ROUND))
+      const v11 = setup(GhostV11SDK, { readerAccount: READER, ghostFee: 0 })
+      const answer = v11.spy.getMockImplementation()!
+      v11.spy.mockImplementation(async (params, options) => {
+        const late = params.rounds?.find((r) => r > LAST_ROUND)
+        if (late === undefined) return answer(params, options)
+        const message = `round ${late} is after the latest round ${LAST_ROUND}`
+        throw Object.assign(new Error(`Network request error. Received status 400 (Bad Request): ${message}`), { status: 400, response: { body: { message } } })
+      })
+      const results = await v11.sdk.atRounds([500, 2000, 900], (s) => blk(s))
+      expect(results.map((r) => r.ok)).toEqual([true, false, true])
+      expect(results[1].ok === false && results[1].error.message).toMatch(/round 2000 is after the latest round 1000/)
+      expect(v11.spy.mock.calls.map(([params]) => params.rounds)).toEqual([
+        [500n, 2000n, 900n],
+        [500n, 900n],
+      ])
+      // the latest round comes from the node's message
+      expect(requests.filter((path) => path.startsWith('/v2/status'))).toHaveLength(0)
+
+      const late = await v11.sdk.atRounds([2000, 3000], (s) => blk(s))
+      expect(late.map((r) => r.ok)).toEqual([false, false])
+      await expect(blk(v11.sdk.atRound(2000))).rejects.toThrow(/round 2000 is after the latest round 1000/)
+      expect(v11.spy).toHaveBeenCalledTimes(4)
+      expect(v11.simulated.requests).toHaveLength(0)
+    })
+
+    test('a query rejected again by a node further behind fails those rounds too; without a latest round in the message, it reads status', async () => {
+      routes['/v2/status'] = status(700)
+      const v11 = setup(GhostV11SDK, { readerAccount: READER, ghostFee: 0 })
+      const answer = v11.spy.getMockImplementation()!
+      // nodes behind a balancer: one at round 1000, then one at 800, then one whose message has no latest round
+      const behind = [1000n, 800n, undefined]
+      v11.spy.mockImplementation(async (params, options) => {
+        const latest = behind.length ? (behind[0] ?? 700n) : 700n
+        const late = params.rounds?.find((r) => r > latest)
+        if (late === undefined) return answer(params, options)
+        const tip = behind.shift()
+        const message = `round ${late} is after the latest round${tip !== undefined ? ` ${tip}` : ''}`
+        throw Object.assign(new Error(message), { status: 400, response: { body: { message } } })
+      })
+      const results = await v11.sdk.atRounds([500, 2000, 900, 750], (s) => blk(s))
+      expect(results.map((r) => r.ok)).toEqual([true, false, false, false])
+      expect(v11.spy.mock.calls.map(([params]) => params.rounds)).toEqual([
+        [500n, 2000n, 900n, 750n],
+        [500n, 900n, 750n],
+        [500n, 750n],
+        [500n],
+      ])
+      expect(requests.filter((path) => path.startsWith('/v2/status'))).toHaveLength(1)
+      expect(v11.simulated.requests).toHaveLength(0)
+    })
+
+    test("doesn't simulate a run at a round after the node's latest, and throws the node's other rejections", async () => {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
       try {
-        // a whole query request fails for a round after the latest; a simulate fails only that round, silently
+        // the node rejects every query here, so a round after the latest fails, without a simulate
         routes['/v2/query'] = { status: 400, body: { message: 'round 2000 is after the latest round 1000' } }
+        routes['/v2/status'] = status(1000)
         const v11 = setup(GhostV11SDK, { readerAccount: READER, ghostFee: 0 })
         v11.spy.mockRestore()
         const queried = vi.spyOn((v11.algorand as unknown as { query: { run: () => Promise<unknown> } }).query, 'run')
-        await blk(v11.sdk.atRound(2000))
-        await blk(v11.sdk.atRound(2000))
-        expect(queried).toHaveBeenCalledTimes(2)
-        expect(v11.simulated.requests).toHaveLength(2)
+        await expect(blk(v11.sdk.atRound(2000))).rejects.toThrow(/round 2000 is after the latest round 1000/)
+        expect(queried).toHaveBeenCalledTimes(1)
+        expect(v11.simulated.requests).toHaveLength(0)
         expect(warn).not.toHaveBeenCalled()
 
         // a request over the node's calls times rounds, from an algokit-utils that doesn't split by them
@@ -960,8 +1027,8 @@ describe('with a stub node', () => {
           body: { message: 'too many calls in total: 1024 calls at 2 rounds is 2048, the limit is 1024 (MaxAPIQueryTotalCalls)' },
         }
         await blk(v11.sdk.atRound(2001))
-        expect(queried).toHaveBeenCalledTimes(3)
-        expect(v11.simulated.requests).toHaveLength(3)
+        expect(queried).toHaveBeenCalledTimes(2)
+        expect(v11.simulated.requests).toHaveLength(1)
         expect(warn).not.toHaveBeenCalled()
 
         // a program larger than any protocol allows can't be simulated either
