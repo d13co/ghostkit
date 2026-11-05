@@ -388,7 +388,7 @@ new Map(accounts.map((addr, i) => [addr, auths[i] === ZERO_ADDRESS ? undefined :
 
 ### Requests and caching
 
-A call makes one simulate request, or more where the node needs them: on a stock node one per group (and per round with `atRounds`); on a dtalgorand node as many as its limits require. With queries, a call makes one query request per up to `maxCalls` app calls and `maxRounds` rounds, at most `maxTotalCalls` app calls × rounds (by default 1,024 at one round, or 64 at 16 rounds), up to 4 at a time, and nothing else: no suggested params, no fee sink lookup (unless a method has an `account` argument, which can encode the sender) and no balance reads. A busy node (503 "the node is busy") is retried by the HTTP client of an `AlgorandClient` made from a config (`AlgorandClient.fromConfig`, `mainNet()`, ...), honoring `Retry-After`, or after at least 1 s where the header can't be read (browsers, cross-origin); one made with `fromClients` passes the error on. 503s for history the node can't serve (an incomplete index, a time-travel history that isn't served) and query 504s aren't retried: queries that run over the node's time limit are split by algokit-utils; simulates over it are retried, as upstream algokit-utils does. On top of that, for simulates:
+A call makes one simulate request, or more where the node needs them: on a stock node one per group (and per round with `atRounds`); on a dtalgorand node as many as its limits require. With queries, a call makes one query request per up to `maxCalls` app calls and `maxRounds` rounds, at most `maxTotalCalls` app calls × rounds (by default 1,024 at one round, or 64 at 16 rounds), up to 4 at a time, and nothing else: no suggested params, no fee sink lookup (unless a method has an `account` argument, which can encode the sender) and no balance reads. Failed requests are retried by the HTTP client, not by ghostkit (see [Retries](#retries)). On top of that, for simulates:
 
 - **Suggested params**, for calls at the latest round, when the cached ones are older than `cacheParamsTimeout` (default 3 s; ghost calls tolerate params a few rounds old, since their validity window is 10 rounds). Calls at past rounds set their own validity, so they reuse params of any age. Params come through `algorand.getSuggestedParams()`, so the AlgorandClient's own cache applies too, and ghostkit never changes it.
 - **Once per AlgorandClient**: the node's capabilities (`GET /v2/capabilities`, only with the dtalgorand forks loaded, and with `backend: 'stock'` or a custom backend only for `ghostFee: 'max'` at past rounds), and the genesis to find the fee sink (only without `readerAccount`, and not on MainNet or TestNet, whose fee sinks ghostkit knows).
@@ -401,6 +401,38 @@ const ghostSDK = new GhostofavmSDK({ algorand, cacheParamsTimeout: 10_000 }) // 
 
 ghostSDK.cacheParamsTimeout = 0 // or set it at runtime: fetch params for every call
 ```
+
+### Retries
+
+ghostkit doesn't retry requests: the HTTP client does. With the dtalgorand forks it follows the policy that dt-algosdk and dt-algokit-utils share (dt-algosdk's `DTALGOSDK.md`, "Retries"). In short:
+
+- A busy node (503 "the node is busy") or a rate limit (429) is retried after the longest of the backoff, the node's `Retry-After` and 1 s. The 1 s also covers a `Retry-After` that can't be read (browsers, cross-origin). A `Retry-After` over 30 s gives up at once.
+- 503s for history the node can't serve (an incomplete index, a time-travel history that isn't served) aren't retried. Neither are 504s from requests under the node's time limit (queries, simulates, deltas, and versions and holders listings), since a retry would run into the limit again. algokit-utils splits a query that runs over the limit (or whose results are too large) and resends the halves; narrow other requests yourself.
+- Every limit can be changed with a `retry` option, `false` for no retries: per client in an `AlgoClientConfig` (`AlgorandClient.fromConfig({ algodConfig: { server, retry: { maxTries: 3 } } })`, for algod and indexer), or for every client with `Config.configure({ retry: { maxRetryAfterMs: 60_000 } })`. The global one is read on every request, so it applies to clients made earlier (`AlgorandClient.mainNet()`) too; a client's own fields win over it one by one.
+
+An `AlgorandClient` made from a config (`AlgorandClient.fromConfig`, `mainNet()`, ...) retries by this policy. One made with `fromClients` and a plain `Algodv2` doesn't retry at all. Wrap its HTTP client with `withRetry` to retry by the same policy (without algokit-utils' logging, event or `Config.retry`):
+
+```typescript
+import { Algodv2 } from 'algosdk'
+import { URLTokenBaseHTTPClient, withRetry, formatRetryWait } from 'algosdk/client'
+
+const http = withRetry(new URLTokenBaseHTTPClient({ 'X-Algo-API-Token': token }, server, port), {
+  onWait: (wait) => setStatus(formatRetryWait(wait)), // "The node is rate limiting requests: retrying in 1 s (retry 1 of 4)"
+})
+const algod = new Algodv2(http, '') // the server comes from the HTTP client
+const algorand = AlgorandClient.fromClients({ algod })
+```
+
+To tell users while a request waits, listen for algokit-utils' `'retry-wait'` event, which carries the same wait as `onWait`; algokit-utils also logs each wait with `Config.logger.warn`:
+
+```typescript
+import { Config, EventType } from '@algorandfoundation/algokit-utils'
+import { formatRetryWait } from 'algosdk'
+
+Config.events.on(EventType.RetryWait, (wait) => setStatus(formatRetryWait(wait)))
+```
+
+With stock algokit-utils and algosdk none of this applies: algokit-utils retries by its own policy, and `retry` and the event don't exist.
 
 ### Debugging
 
