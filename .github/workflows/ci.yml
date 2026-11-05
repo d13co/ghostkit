@@ -55,12 +55,13 @@ jobs:
             exit 1
           }
 
-      - name: Check types
-        run: npm run check:example
-
-      # Offline, once with the dtalgorand fork of algokit-utils and once with stock algokit-utils
+      # Offline, once with the dtalgorand fork of algokit-utils and once with stock algokit-utils. Its global setup
+      # generates the SDKs in test/generated/ (not committed), which the type check below needs.
       - name: Test
         run: npm test
+
+      - name: Check types
+        run: npm run check:example
 
       - name: Check the version in package.json, package-lock.json, the README and the tag
         env:

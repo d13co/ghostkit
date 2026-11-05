@@ -518,7 +518,7 @@ With pnpm, put the same two entries under `overrides` in `pnpm-workspace.yaml` (
 Ghostkit installs the dtalgorand forks the same way, in `package.json`'s `dependencies` and `overrides`.
 
 - `npm run build`: compiles ghostkit and regenerates `examples/GhostofavmSDK.ts`.
-- `npm run check:example`: type-checks the example SDK and the tests against the fork of algokit-utils, and the example SDK against stock algokit-utils.
+- `npm run check:example`: type-checks the example SDK and the tests against the fork of algokit-utils, and the example SDK against stock algokit-utils. The tests import SDKs that `npm test` generates into `test/generated/`, so run it first in a fresh checkout.
 - `npm test`: unit tests, offline, once with each algokit-utils.
 - `npm run test:live`: live tests, once with each algokit-utils. Set `ALGOD_SERVER` (e.g. `http://localhost:4001`, a LocalNet on consensus v42) and/or `DT_ALGOD_SERVER` (a MainNet dtalgorand node with time travel); tokens in `ALGOD_TOKEN` / `DT_ALGOD_TOKEN`. Run the dtalgorand suite against a node with queries on and one with them off (`MaxAPIQueryCalls: 0`), to cover both queries and the multi-group simulate; the query-only tests skip on a node with queries off.
 
@@ -526,10 +526,10 @@ The SDK's runtime is `src/templates/runtime.ts`, a regular module that ghostkit 
 
 ### Releasing
 
-GitHub Actions tests and publishes ghostkit, with [`.github/workflows/ci.yml`](.github/workflows/ci.yml). On every push and pull request to `main` it builds, checks that the committed `dist/` and `examples/GhostofavmSDK.ts` are what the source builds, type-checks, runs the unit tests (offline) and checks the versions with `scripts/release-check.mjs`. The live tests need nodes, so run them yourself before a release. On a `v<version>` tag it also publishes the package to npm with provenance, as `latest`, and creates a GitHub release with the package tarball.
+GitHub Actions tests and publishes ghostkit, with [`.github/workflows/ci.yml`](.github/workflows/ci.yml). On every push and pull request to `main` it builds, checks that the committed `dist/` and `examples/GhostofavmSDK.ts` are what the source builds, runs the unit tests (offline), type-checks and checks the versions with `scripts/release-check.mjs`. The live tests need nodes, so run them yourself before a release. On a `v<version>` tag it also publishes the package to npm with provenance, as `latest`, and creates a GitHub release with the package tarball.
 
 1. Set the version: `npm version <version> --no-git-tag-version`. Ghostkit pins the dtalgorand forks exactly; when they change, update `dependencies` and the install snippet above together, since the check compares them.
-2. `npm run build`, `npm run check:example`, `npm test`, the live tests, and `npm pack --dry-run` to check the contents (`dist/` and `README.md`).
+2. `npm run build`, `npm test`, `npm run check:example`, the live tests, and `npm pack --dry-run` to check the contents (`dist/` and `README.md`).
 3. Commit and push `main`, then tag the commit and push the tag: `git tag -s v<version>` and `git push origin v<version>`.
 4. The workflow checks that the tag is on `main` and names the version in `package.json` and `package-lock.json` (`node scripts/release-check.mjs v<version>` runs the same check locally), runs the checks and tests again, and publishes with `npm publish --tag latest`. npm publishes a prerelease such as `0.1.0-dt.7` only with an explicit tag. If the version is already on npm, the workflow skips publishing and only creates the GitHub release.
 
