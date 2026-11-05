@@ -3,15 +3,23 @@
 import { readFileSync } from "fs";
 import { join } from "path";
 import { buildGhostSDK } from "./build";
+import { checkProjectGhostkit } from "./version-check";
 
 const { version } = JSON.parse(readFileSync(join(__dirname, "../package.json"), "utf8")) as { version: string };
 
-const [command, ...rest] = process.argv.slice(2);
+const [command, ...args] = process.argv.slice(2);
+const anyVersion = args.includes("--any-version");
+const rest = args.filter((arg) => arg !== "--any-version");
 
 (async () => {
   switch (command) {
     case "build":
       if (rest.length !== 0) {
+        const mismatch = anyVersion ? undefined : checkProjectGhostkit({ cwd: process.cwd(), self: { version, dir: join(__dirname, "..") } });
+        if (mismatch) {
+          process.stderr.write(`[Ghostkit] error: ${mismatch} (--any-version skips this check.)\n`);
+          process.exit(1);
+        }
         let failures = 0;
         for (const appSpecPath of rest) {
           try {
@@ -32,7 +40,10 @@ const [command, ...rest] = process.argv.slice(2);
 
 Supported commands:
 
-    ghostkit build a.arc56.json [b.arc56.json]
+    ghostkit build a.arc56.json [b.arc56.json] [--any-version]
+
+Run it as the project's copy: npm exec ghostkit (pnpm exec ghostkit, yarn ghostkit). It refuses to build when it isn't
+the ghostkit the project's package.json depends on; --any-version builds anyway.
 `);
       process.exit(command === "help" ? 0 : 1);
   }
